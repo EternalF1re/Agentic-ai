@@ -243,6 +243,66 @@ These metrics belong in Ch.16's trace pipeline next to the retrieval signals fro
 
 ---
 
+## Common failure cases
+
+The chapter above is the design. This section is what still breaks once that design is running in production — the failures you actually get paged for — and the pattern that resolves each. They are ordered by how often they bite, not by how interesting they are: the first two go wrong on almost every agent that ships memory; the last three start to matter once you are at scale or under attack.
+
+### Your memory slowly fills with junk
+
+*The symptom in one line: the agent remembers more and more, and finds the useful thing less and less.*
+
+After a few weeks the store is full of one-off debugging output, fragments of long error messages, and the user's own questions echoed back as "facts." Retrieval (Ch.06) now returns three useful entries buried under thirty worthless ones, and every session starts heavier because more of that junk is injected into the prompt (Ch.04). The model did not get dumber; its memory got noisier. The cause is almost always an eager `write_memory` tool whose description told the model what it *could* save but never drew a hard line around what it must *not*.
+
+The fix is the chapter's "default to no," made operational. Make the tool description's *never-write* list ruthless and specific — name the actual junk: transient tool output, the user's own question, anything re-derivable from the codebase in seconds. Then measure it: track the **write-amplification ratio** (memory writes per successful turn); if it climbs toward 1.0 the model is treating memory as a scratchpad, and you should alarm on it. And don't trust a low rejection rate to mean clean writes — a near-zero rejection rate usually means your filter isn't biting at all. The cheapest improvement in this whole chapter is one ruthless sentence in a tool description; the most expensive bug is its absence.
+
+### The agent confidently says something that stopped being true
+
+*The symptom in one line: a fact that was right three months ago is still being stated as right today.*
+
+The staging URL moved, the user switched their preferred language, the deploy steps changed — but the old fact is still in memory, still injected every session, still outranking reality. The uglier version is a *contradiction*: two entries say opposite things ("prefers TypeScript" and "prefers JavaScript"), the model picks one at random each turn, and the agent appears to flip-flop. The cause is writes that never carried an expiry signal or a conflict check, so nothing ever demoted the stale fact.
+
+Three fixes the chapter names but teams skip under deadline. First, stamp **confidence and a timestamp** on every write *and actually surface staleness to the model* — an entry past its freshness window enters the prompt flagged `stale: true` so the model knows to verify instead of trust; a decay signal the model never sees does nothing. Second, run the conflict check (supersede / merge / drop) at *write* time for obvious contradictions, not only later in the curator — a fresh "prefers JavaScript" should immediately supersede "prefers TypeScript," never coexist with it. Third, track **provenance reach**: when the model uses an entry, log how old it was; a fact acted on 200 days after it was written is either gold or a landmine, and you want to know which. The fix is not "remember less" — it is "let every memory age, and let a newer fact win the argument."
+
+### The agent thinks it saved something, but after a crash it's gone
+
+*The symptom in one line: a write the agent believed succeeded simply isn't there after a restart — or is half-there.*
+
+This one only bites once a memory write does more than touch a single file. The moment a write also refreshes a search index, bumps a counter, or emits an event for the curator, you have several steps that must *all* happen or none — and a crash in the middle leaves a *torn write*: the note saved but the index stale, or the event lost so the curator never sees the entry. (If your memory genuinely is one local file, the chapter's atomic rename already covers you — don't build the machinery below that you don't need.) The nastier variant: if the *decision* to write lived only in a background thread's memory, a crash before it reached disk loses the write with no trace, because it was never durable to begin with.
+
+The fix is the **outbox pattern**: write down what you *intend* to do before you do it. In one all-or-nothing step — a database *transaction*, a group of writes that either all commit or none do — save both the memory entry and a small to-do record of its side effects into a durable "outbox." A separate relay process then reads the outbox and carries out those side effects (index, event), marking each done only once it succeeds. Crash anywhere and the relay simply replays the outbox on restart; nothing is lost, because the intent was committed first. The relay may hand you the same job twice, so its consumers must be **idempotent** — safe to run twice with no extra effect (Ch.03's idempotency key).
+
+```ts
+// The memory entry and its to-do list commit together, in one transaction:
+await tx(async (t) => {
+  await t.writeMemory(entry);                  // the durable fact
+  await t.appendOutbox({ do: "index+event", entryId: entry.id });
+});                                             // a crash after this line is safe
+
+// A separate relay drains the outbox later, retrying until each step sticks:
+for (const job of await outbox.pending())       // may hand you the same job twice
+  await runIdempotently(job);                   // ...so each step must be replay-safe
+```
+
+This is the memory-layer face of Ch.08's durable-execution problem, and it has one rule: to answer *"did that step actually happen?"*, write the intent down *before* doing the work, never after.
+
+### You built a curator, but it never runs
+
+*The symptom in one line: the cleanup process exists, yet memory grows forever and nobody notices until it's slow.*
+
+The chapter schedules curation on *idle time*. On a busy agent — a popular assistant, a multi-tenant tool — there is no idle time, so the curator never fires and the "finite memory footprint" it promised never arrives. Memory grows without bound: every session starts with more prefix bytes (Ch.04), retrieval gets noisier (Ch.06), and the agent gets slower, dumber, and more expensive at once. Nothing errors — the graphs just drift, which is why this is usually caught late.
+
+The fix is a **hybrid trigger with a hard cap**: run the curator on idle *or* when the store crosses a size/age threshold *or* on a maximum-interval floor (at least once a day, no matter what), whichever comes first — and enforce a hard byte budget that forces a curation pass before the next session can start. Then prove it is alive with the chapter's own observability: alarm when memory bytes exceed budget, or when the curator's weekly action count flatlines to zero. A curator you cannot show ran is a curator that is not running.
+
+### An attacker hides instructions in what the agent remembers
+
+*The symptom in one line: something the agent stored quietly carries a command, and that command runs every session afterward.*
+
+The chapter is honest that the verbatim pattern filter is a speed bump, not a wall — *"an adversary who reads your filter will get past it."* Here is the production shape of that failure: a hostile instruction, obfuscated past the filter (unicode look-alike characters, base64, an "ignore previous" split across two sentences), gets *written* into memory. From then on it sits in the system prompt every future session — a compromise that survives restarts, precisely because memory is the part of the system built to survive restarts. This is "memory poisoning," and it is one of the highest-leverage attacks on an agent.
+
+The fix is to **defend on the read side, not only the write side** (Ch.18 owns the full threat model). Three layers: **quarantine** freshly-written memory for a few sessions before it is allowed to influence behavior, giving the curator or a human a window to catch it; render retrieved memory to the model as clearly-fenced *data*, never as trusted instructions, so even a clean injection carries no authority; and log every filter hit, because the next obfuscation you need to catch is already sitting in that log. The mental shift that closes this whole class of bug: treat memory as untrusted input on the way *out* of the store, not only on the way *in*.
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

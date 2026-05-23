@@ -251,6 +251,44 @@ Hermes Agent goes one step further and persists the rendered prefix to its Sessi
 
 ---
 
+## Common failure cases
+
+The chapter above is the design. This section is what still breaks once that design is running in production — the failures that actually show up on the bill and in the latency graphs — and the pattern that resolves each. They are ordered by how often they bite, not by how clever they are: the first two go wrong on nearly every agent that ships, usually by accident; the last two start to matter once you have real traffic, many tenants, or long conversations.
+
+### A live value sneaks into the prefix and the cache never fires
+
+*The symptom in one line: the bill is several times what you expected and `cache_read_input_tokens` is sitting near zero.*
+
+This is the most common cache failure there is, and it is almost never deliberate. Someone adds a "the assistant knows the current time" line, or a greeting that names the session, or a counter ("turn 14 of this conversation"), and now a value in the stable prefix changes every single turn. Every turn is a fresh prefix, every turn is a full-price cache miss, and nothing errors — the agent works perfectly, it just costs four times as much. The reason it survives review is that the leaked value is usually *helpful*: a timestamp, a request ID, a per-turn counter, a randomized tip-of-the-day. Helpful, dynamic, and sitting on the wrong side of the stable/volatile line.
+
+The fix is to make the leak *loud* instead of silent, and the lever is the **prefix fingerprint** this chapter already builds — turned into an alarm. Log the SHA of the rendered stable prefix on every request, and alarm when the fingerprint changes *within a single session* (the immutability rule says it must not) or when the per-session **cache hit ratio drops below a floor** — 60% is a reasonable tripwire for a steady multi-turn workflow, below which something is re-paying that should not be. Treat anything dynamic as guilty until proven static: a value that wants to be live belongs in the volatile tail, never the prefix. The cheapest insurance is a unit test that builds the prefix twice, a few milliseconds apart, and asserts the two fingerprints are byte-identical — that one assertion catches `Date.now()` before it ever reaches production.
+
+### A deploy quietly invalidates every warm cache
+
+*The symptom in one line: cache hit rate was healthy yesterday, a release shipped, and now every session is paying full price for its prefix.*
+
+The within-session leak above is per-turn; this one is per-deploy and worse, because it hits *all* sessions at once. Nothing in the prompt-builder code changed — but a reformat-on-save tool normalized the quotes in your prompt template, or a dependency bump reordered the tool schema serialization, or someone edited one tool description for clarity. The bytes of the stable prefix shifted, and on the next deploy every live session's cached prefix stopped matching. The graphs drift down all at once and stay down until the caches re-warm; if deploys are frequent, the cache barely gets a chance to pay for itself at all.
+
+The fix is to treat the rendered prefix as a **build artifact under change control**, not an incidental output. Snapshot the per-layer fingerprints (identity, tools, context, memory) this chapter describes into your release pipeline, and **fail the deploy — or at least raise a loud warning — when a layer's fingerprint changes without a corresponding intentional change** to that layer. A tools-fingerprint delta with no tool edit in the diff is a serialization-order bug or a stray formatter; an identity-fingerprint delta with no instruction edit is whitespace drift. When a prefix change *is* intentional (you really did edit a tool description), the anti-pattern is shipping it mid-day to live sessions — roll prefix changes out at session boundaries and expect the one-time re-warm cost, the same way you would batch a migration. The per-layer fingerprint turns "the cache broke on Tuesday's release" into "the formatter touched the template" in one log line.
+
+### Cache discipline collapses the moment you have more than one tenant
+
+*The symptom in one line: caching looked great in the single-user demo, and the hit rate fell off a cliff the week you onboarded real customers.*
+
+A single-user prefix caches beautifully because there is only one of it. The first time you serve many users from the same agent, two things break at once. If you keep the prefix user-agnostic but forget to scope the *cache lookup* per tenant, you risk one tenant's prefix serving another's request — a correctness and privacy bug, not just a cost one. And if you "fix" that by folding per-user data (their name, their preferences, their workspace path) into the prefix, you now have a distinct prefix per user, the shared cache shatters into thousands of single-use entries, and your hit rate craters because almost no prefix is ever reused. Either way the cache stops being a shared asset.
+
+The fix is to make the **shared/per-tenant boundary explicit in the builder and in the cache key**. Keep everything truly common — system rules, base tool registry, model-family instructions — in a first block that is genuinely user-agnostic and cached once across all tenants; push everything user-specific into the volatile tail or into a clearly-scoped second block whose cache line is keyed by tenant. This is the same two-part split this chapter describes for per-agent variants, applied to tenants: shared first, scoped second, cache at the boundary. The metric that proves it works is **cache reuse count per prefix** — how many requests hit each distinct cached prefix. If that number is near 1.0 across your fleet, your prefix is accidentally per-user and the shared cache is doing nothing; a healthy multi-tenant system shows the shared block reused across the whole population while only the scoped tails miss. Ch.15 owns the broader multi-tenant isolation story; the piece that lives here is keeping the cache shared without leaking one tenant's bytes into another's prefix.
+
+### Compaction fires too eagerly and keeps the cache cold
+
+*The symptom in one line: a long conversation never overflows context, yet its cost per turn stays stubbornly high and lumpy.*
+
+Compaction rewrites the message array, which means it breaks the message-level cache from the point it touches forward — a necessary cost when you are about to overflow, a pure waste when you are not. The failure is a trigger that fires on a fixed cadence (every five turns, say) regardless of pressure: each firing throws away cache the conversation was about to reuse, the recent turns re-process from scratch, and the per-turn cost sawtooths instead of staying flat. The conversation is nowhere near the context limit, but you are paying as if every few turns were turn one. It is easy to miss because total cost still looks "reasonable" — it is just quietly 30–50% higher than it needs to be.
+
+The fix names two patterns this chapter introduces and makes them measurable. First, **compact reactively, not on a cadence** — trigger only when you are genuinely approaching the context budget, so the cache discontinuity is paid for by content that was about to roll off anyway. Second, **compact at the back, never the middle** — summarize the oldest turns and protect a window of recent ones, so the breakpoint moves as little of the cached suffix as possible. To know whether your trigger is too eager, watch the **ratio of compactions to turns** alongside the cache hit ratio: if compactions are firing well before context pressure would force them, the trigger is the bug, and the cache-hit graph will show a dip on every compaction that did not need to happen. Ch.05 owns the compaction techniques themselves; the cache-shaped lesson here is that *when* you compact is a cost decision, and "as late as safely possible" is almost always the right answer.
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

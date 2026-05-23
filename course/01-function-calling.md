@@ -134,6 +134,60 @@ If you are building seriously, hide the wire format behind a small adapter so yo
 
 ---
 
+## Common failure cases
+
+The chapter above is the round-trip done right. This section is what still breaks once that round-trip is wired into a real provider and a real handler — the failures you hit in the first week, not the clever edge cases. They are ordered by how often they bite: the first two go wrong on almost every agent the day you wire up tools; the last three start to matter once the tool does real work or the model has real choices to make.
+
+### Every tool request must get an answer, or the next turn 400s
+
+*The symptom in one line: the conversation just stops, and the provider rejects your next call with an error about an unanswered tool call.*
+
+This is the single most common wiring bug, and it surfaces as a hard API error rather than a wrong answer — which is mercifully easy to spot but easy to *cause*. Every `tool_use` block the model emits has an `id`, and the provider requires that your *next* message contain exactly one `tool_result` for *each* of those ids — no more, no fewer. You break the rule three ways: your handler throws and you swallow the exception, so no result goes back; the model emits two parallel tool calls (this chapter's "parallel tool calls" knob) and you answer only the first; or you reorder messages and the result lands before the request. The provider sees a dangling request and refuses the whole conversation. The chapter says the `id` round-trip is "worth a unit test" — this is *why*, and the failure is structural, not statistical.
+
+The fix is an invariant, not a try/catch: **answer every tool_use, unconditionally.** Collect the ids the model emitted, and before you send the next request, assert that your `tool_result` set covers exactly that id set — same as the "wrap exceptions as tool results" rule from this chapter, extended to *cover the whole set*. A handler that throws still owes the model a `tool_result` carrying the error (Ch.03 calls this the result envelope); a refusal still owes a result; a parallel batch owes one per id. Operationally, watch the rate of these dangling-block API rejections — it should be flat zero, so any non-zero count is an alarm, not a dashboard line. The anti-pattern to ban in review: a `for` loop over tool calls with a `continue` or early `return` inside it, which is exactly how one id silently goes unanswered.
+
+```ts
+// Don't dispatch and hope. Reconcile the id sets before the next model call.
+const requested = new Set(toolUses.map(t => t.id));
+const results = await Promise.all(toolUses.map(runToolReturningEnvelope)); // never throws
+const answered = new Set(results.map(r => r.tool_use_id));
+assert(eqSets(requested, answered), "dangling tool_use — provider will 400");
+```
+
+### The arguments pass the schema but the value is made up
+
+*The symptom in one line: the JSON is perfectly well-formed, the tool runs, and the result is confidently wrong.*
+
+The chapter covers the *shape* failure — a string where you wanted an integer — and validation catches that. The higher-frequency failure is the one validation *can't* catch: the model emits `{ "order_id": "ORD-48213" }` where `ORD-48213` is a plausibly-formatted ID that does not exist, or `{ "city": "Tokoyo" }`, or a date in the right format but the wrong year. The arguments match the JSON schema exactly, so they sail through every check this chapter describes; the function then runs against a hallucinated value and either errors deep in your stack or — worse — returns something for the *wrong* entity. Strict schema mode (the provider knob from this chapter) makes this *more* likely to slip through, not less, because it guarantees well-formed arguments and can lull you into skipping the semantic check.
+
+The fix lives one layer past the schema, and the chapter's own rule carries it: **bad inputs are messages, not exceptions** — so when a value is well-formed but doesn't resolve, return a `tool_result` that *names what was wrong and what to do instead*, not a generic failure. `"No order found with id ORD-48213. Valid ids look like ORD-NNNNN and must reference an existing order; ask the user to confirm the number."` gives the model something to recover from; `"lookup failed"` gives it nothing and it will retry the same bad id. This is the validation-pipeline's "semantically safe" stage that Ch.03 makes explicit — the check that the value *means* something, run after the check that it *parses*. Measure it per tool: track a **tool-error rate** split into schema errors versus not-found / semantic errors, because a rising semantic-error rate on one tool usually means its description never told the model where to *get* a valid value.
+
+### The model won't call the tool when it should — or calls it constantly when it shouldn't
+
+*The symptom in one line: the agent fabricates an answer it had a tool for, or it calls a tool on turns that needed none.*
+
+Both directions trace to the same root and both are common. Under-calling: the user asks for today's exchange rate, the model answers from stale training data instead of calling `get_rate`, because the description read like a hint rather than a rule. Over-calling: the model calls `search_docs` on a plain greeting, burning a round-trip and latency on a turn that needed pure text. The chapter's "a description tells the model *when not to* call it" is the lever, but under deadline teams write the happy-path description and stop. This is not a hallucination quirk to tolerate — it is a tunable behavior.
+
+Two fixes, both named in this chapter but rarely applied as a feedback loop. First, treat tool selection as a measurable thing: sample real turns and score **tool-selection precision and recall** — did it call the tool when a tool was needed (recall), and avoid calling one when none was (precision)? A low number on either side points straight at the description, which is the cheapest thing in the system to edit. Second, when the choice is *not* the model's to make, take it: use the `tool_choice` knob from this chapter — *must-call-X* in a routing layer where you already know a tool is required, *none* when you want a guaranteed text reply. The anti-pattern is "fix" by stuffing the system prompt with *"ALWAYS use the search tool"* — that swings you straight into over-calling and bloats the cached prefix (Ch.04). Edit the *tool's* description, or set `tool_choice`; don't shout in the system prompt.
+
+### A single tool call hangs and takes the whole turn down with it
+
+*The symptom in one line: one slow dependency, and the agent appears frozen with no error and no result.*
+
+The four-step cycle is synchronous — step 3 blocks until your handler returns — so a tool that calls a flaky upstream API with no timeout will hang the entire turn, and from the user's side the agent has simply stopped. The chapter doesn't cover timeouts because they live just outside the wire protocol, but they bite weekly the moment a tool reaches across a network. The nastier version is partial: under parallel tool calls, one slow tool in the batch stalls all of them, because you're waiting on the whole `Promise.all` before you can answer *any* id.
+
+The fix is a **per-tool deadline that converts a hang into a readable result**, not a thrown exception that kills the turn. Wrap each handler in a timeout sized to that tool — a local file read gets 2 seconds, a third-party API gets 10, a deliberately long job gets a different design entirely (Ch.08's durable execution, not a blocking call). On timeout, return a `tool_result` like `"get_rate timed out after 10s; the rate service may be down — try again or proceed without it"`, which keeps the loop alive and lets the model route around the dead dependency. Set the per-tool timeout *below* any overall turn budget the loop enforces (Ch.02's stop conditions), so a single tool can never consume the whole turn's time. Watch each tool's latency distribution, and alarm on the **p99**, not the average — the average hides exactly the slow tail that causes the freeze.
+
+### A large tool result silently wrecks every later turn
+
+*The symptom in one line: nothing errors, but each turn after a big result gets slower and more expensive for no obvious reason.*
+
+The chapter flags that large results don't belong inline; the failure mode worth going deeper on is *why it's invisible*. A `grep` that returns 50 KB or a file read of 2 MB doesn't crash anything — it lands in the message array, gets re-sent on every subsequent turn, and quietly does three things at once: it eats context-window headroom, it invalidates the prompt cache (Ch.04) because the prefix changed shape, and it drags latency and cost up on *every following turn*, not just the one that produced it. There is no exception to catch, so this is usually discovered by reading a bill, not a stack trace.
+
+The fix is the chapter's snippet-plus-pointer pattern, made enforceable: **clip at the tool boundary with a hard byte budget, before the result ever enters the message array.** If a result exceeds the threshold, send the model a head/tail snippet plus a handle it can call back for the full thing (OpenCode wraps this in a dedicated truncation service; Hermes Agent enforces per-tool result-size limits — both named in this chapter's Real-system notes). Make the clip a property of the *tool definition*, not a thing you remember to do at each call site, so it can't be forgotten on the one tool that returns megabytes. And measure the **result-size distribution per tool** — a long tail there is a leading indicator of the slow, expensive turns before anyone notices the bill, the same way Ch.16 treats result size as a first-class trace attribute.
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

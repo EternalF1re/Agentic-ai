@@ -257,6 +257,44 @@ A second-order benefit: when your tools are reduced per agent, your validation s
 
 ---
 
+## Common failure cases
+
+The chapter above is the contract. This section is what still breaks once that contract is running against a real model in production — the failures you actually get paged for — and the pattern that resolves each. They are ordered by how often they bite, not by how interesting they are: the first two go wrong on almost every agent that ships a non-trivial tool; the last two start to matter once a tool mutates the world or its output gets large.
+
+### The arguments parse cleanly and the call is still wrong
+
+*The symptom in one line: the schema validator says yes, and the tool does the wrong thing anyway.*
+
+This is the single most common tool failure in production, and it almost never shows up as an error. The model emits a `limit: 100000` that is a perfectly valid positive integer and then blows your context window; a `user_id: "self"` it invented from training data; a path that string-matches your workspace prefix but resolves outside it; a date in the future for a "show me last week" query. Nothing throws — the JSON is well-formed — so the call sails past schema validation and the handler does exactly what the malformed-but-valid arguments told it to. The cause is treating *"the JSON parsed"* as *"the inputs are safe,"* which collapses two separate checks into one.
+
+The fix is to keep the **semantic check next to the schema check and run it before the handler**, and then to treat the failures it catches as a product signal, not just a guardrail. Every recoverable rejection — bad enum, out-of-range limit, path escape, identifier the domain doesn't recognize — should be logged with structure: tool name, the *stage* it failed at, the model's exact arguments, and the error code. That log is a free evaluation surface. Watch the **per-tool semantic-rejection rate**; when one tool's rate climbs week over week, the problem is almost always its description, not the model — the model is confidently emitting an argument shape your prose never told it was wrong. Alarm when any single argument (a specific enum, a specific path field) accounts for an outsized share of rejections, because that is a description bug you can fix with one sentence. The anti-pattern to kill on sight: a handler that "defensively" coerces a bad value into a plausible one (clamps the limit, rewrites the path, defaults the id) instead of returning a recoverable error — silent coercion turns a visible validation failure into an invisible wrong answer.
+
+### The tool returns "ok" and nothing actually happened
+
+*The symptom in one line: the model reports success, the loop moves on, and hours later you find the side effect never landed.*
+
+This is the deploy tool from the opening scenario, and it is endemic to any tool that wraps a network call. The downstream API accepts the request and returns a 200 before the work is durable — the message is queued but not sent, the row is written to a replica that never gets promoted, the deploy is acknowledged but silently dropped. The tool returns its optimistic default, the model takes `"ok"` as proof, and the failure is invisible until a human notices the missing outcome. The cause is a tool that reports *what it sent* instead of *what the world now looks like*.
+
+The fix is **verify-by-read-back inside the tool, and put the proof in the metadata**. After a write, re-read the row and return its id and a hash; after a send, return the provider's message id, not your local request id; after a deploy, return the cluster's view of the running revision. The handler — not the model — is responsible for confirming the effect, because the model has no way to tell an honest `"ok"` from a hopeful one. Operationally, track the **silent-success rate**: the fraction of mutating calls that returned success but whose read-back could not confirm the effect. It should be near zero; any sustained nonzero value is a tool lying to your loop. Where a synchronous read-back is impossible (the work is genuinely asynchronous), do not return `"ok"` at all — return a pending handle and a follow-up the loop can poll, so "I don't know yet" never gets rounded up to "done." This is the metadata-rich envelope from this chapter doing its real job: the `meta` block (`file_hash`, `exit_code`, downstream id) is not decoration, it is the only evidence the side effect occurred.
+
+### A retry sends it twice — or refuses to send it again on purpose
+
+*The symptom in one line: the customer gets two identical emails, or the user asks to resend and nothing goes out.*
+
+Both halves of this are the same bug — an idempotency key scoped at the wrong grain — and most teams hit one of them within the first month of shipping a tool with a side effect. Scope the key too coarsely (tool name plus arguments alone) and a *deliberate* repeat at a different turn gets silently deduped: the user says "send that again" and the cache swallows it. Scope it too narrowly, or forget the key entirely, and a transient timeout that triggers the loop's retry (Ch.02) produces a genuine double-send. The quieter variant: the dedup store has no TTL, so a key written months ago suppresses a legitimately-new operation that happens to hash the same; or the store *is* the cache and a crash loses it, so the "exactly once" you promised silently degrades to "at least once."
+
+The fix is to **scope the key by the unit of work the user thinks they are doing, and let the downstream own dedup whenever it can**. Hash arguments so a retry of the *same* call hits the cache; fold in the turn, run, or an explicit user-supplied token so an *intentional* repeat hashes differently and goes through. When the downstream API exposes its own idempotency header (the well-built payment and queue APIs all do), thread it through and make the downstream the source of truth instead of recomputing one above it — a dedup decision made in your process is a dedup decision lost on the next crash. Operationally, give the dedup store a TTL tied to the operation's natural lifetime, and emit a metric for **idempotency-cache hits**: a sustained nonzero rate means retries are firing, which is either healthy (transient errors absorbed) or a smell (a flapping downstream the loop is papering over) — you want to know which. Test both directions explicitly, because a key that prevents double-sends and a key that allows intentional re-sends are not automatically the same key.
+
+### Clipping blinds the model — or the full result blows the budget
+
+*The symptom in one line: the model reasons confidently from output it only half-received, or one giant tool result torches the context window for the rest of the session.*
+
+A `read_file` on a 2 MB log, a shell command that prints ten thousand lines, a search that matches everything — the raw output is far larger than the model should ever see in the message array. Clip it silently and the model treats the truncated fragment as the whole thing and draws a wrong conclusion (the error it needed was in the bytes you dropped). Don't clip it at all and that single result sits in the prompt for the rest of the session, re-sent and re-billed every turn (Ch.04), eating the budget the rest of the work needs. The cause is treating the message array as a *storage* surface when it is only a *display* surface.
+
+The fix is the chapter's **clip-for-the-model, persist-in-full** rule, made operational on three points the chapter states but teams skip under deadline. First, **make truncation loud**: insert an explicit marker (`...[120 KB clipped; full result at <ref>]...`) so the model knows it is holding a fragment and can ask for more — silent clipping teaches the model a false view of the world. Second, **the pointer has to be followable**: a `<ref>` the model cannot retrieve through a real tool (`read_full_result`, `grep_result`) is theater; build the retrieval path at the same time you build the clipper, or the model is permanently blind to the dropped bytes. Third, **enforce a per-tool result-byte budget at the dispatch boundary**, not inside each handler, and alarm on the **clip rate per tool**: a tool clipped on nearly every call is a tool whose interface is wrong — it should take a `limit`, a query, or a page argument so the model asks for the slice it needs instead of the firehose it doesn't. The smell to watch for is a single tool dominating your token spend (Ch.17); nine times out of ten it is an un-budgeted result surface, not the model being verbose.
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

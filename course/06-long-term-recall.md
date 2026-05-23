@@ -244,6 +244,52 @@ The recall layer and the prompt-builder layer are not separate concerns — they
 
 ---
 
+## Common failure cases
+
+The chapter above is the design. This section is what still breaks once that design is running in production — the recall failures you actually get paged for — and the pattern that resolves each. They are ordered by how often they bite, not by how interesting they are: the first two go wrong on almost every agent that ships retrieval; the last three start to matter at scale, under migration, or under attack.
+
+### Vector search always returns something, even when nothing matches
+
+*The symptom in one line: the agent confidently cites a memory that has nothing to do with the question.*
+
+A k-nearest-neighbors query is structurally incapable of returning nothing — ask for the top 5 and you get 5 rows, no matter how irrelevant. So when the user asks about an error code that was never stored, the vector index hands back the five *least far* vectors, the reranker dutifully orders them, and the model treats the closest piece of unrelated noise as the answer. This is the most common recall bug on every agent that ships a vector store, and it reads from the outside like a hallucination — the model isn't making things up, it's faithfully repeating garbage retrieval gave it. The cause is that nobody set a floor: similarity is a *ranking* signal being misused as a *relevance* signal.
+
+The fix is a **score floor plus a query-type router**, neither of which the chapter spells out. First, set an absolute similarity threshold below which a result is dropped rather than ranked — an empty hand is a correct answer when the store genuinely has nothing, and the chapter's *empty-hand rate* metric is what you tune the floor against (if it's pinned at zero, your floor is too low and noise is leaking through). Calibrate the threshold on a held-out set of queries you know *should* miss, not just ones that should hit. Second, route by query shape before you embed anything: a string that's mostly an identifier — a ticket number, an error code, a commit hash, a file path — should go to full-text search *first*, because vectors lose on exact tokens (the chapter says this; the operational move is to detect the identifier and skip the vector hop entirely). The anti-pattern to kill is "embed everything, rank everything, trust the top result" — that pipeline has no way to say *I don't know*.
+
+### Bad chunking quietly caps your recall ceiling
+
+*The symptom in one line: the right document is in the store, but the agent keeps retrieving the wrong piece of it — or half of it.*
+
+Before anything gets embedded it gets *chunked* — split into passages small enough to index. Get the chunk boundaries wrong and you cap recall quality before retrieval logic ever runs, and no amount of reranker tuning recovers it. Two failure shapes dominate. Chunks too large: a 4-KB passage embeds to one averaged-out vector that matches everything weakly and nothing strongly, so the precise question never gets a precise hit. Chunks too small: a single fact — *"the staging URL is `staging.example.com` and it requires the `VPN_REQUIRED` flag"* — gets split across two chunks, and retrieval returns the URL without the caveat, which is worse than returning nothing. The cruel part is that this looks identical to a retrieval bug, so teams burn days swapping embedding models when the real fix is upstream of the embedding entirely.
+
+The fix is to **chunk on semantic boundaries with overlap, and measure recall, not similarity scores**. Split on natural seams — markdown headers, the `§` delimiters the chapter notes Hermes Agent and OpenClaw use, paragraph breaks — never on a blind character count that guillotines a sentence. Add a small overlap between adjacent chunks (a sentence or two) so a fact straddling a boundary survives in at least one whole chunk. Then prove it: build a tiny gold set of *(question → the chunk that should answer it)* pairs and track **recall@k** — did the right chunk appear in the top k at all? — because a pipeline can post great cosine scores while never surfacing the chunk that actually holds the answer. When you re-chunk, you must re-embed; treat a chunking-strategy change with the same migration discipline the chapter applies to swapping the embedding model.
+
+### The index falls behind the source of truth
+
+*The symptom in one line: the agent retrieves a fact that was edited or deleted minutes ago, or can't find one that was just written.*
+
+The chapter covers staleness *within* a session (frozen prefix, byte-stable cache). The version that pages you is staleness *across* the write path: the canonical store and its search index update on different clocks. A user edits a memory entry, the row commits, but the embedding re-index lags in a queue — for the next several minutes retrieval serves the old vector. Worse, on a delete: the row is gone from the table but its vector lingers in the index, so a *soft-deleted or right-to-be-forgotten entry keeps getting recalled*, which the chapter rightly calls "the same kind of correctness bug as a tenant leak." The cause is treating the index as if it updates synchronously with the source of truth when it almost never does.
+
+The fix is to **make the index a derived view that fails safe, and alarm on its lag**. Re-validate every retrieved candidate against the canonical row before it reaches the prompt: if the source row is gone or marked deleted, drop the hit even though the index returned it — the index proposes, the source of truth disposes. Track **index lag** (time between a write committing and its becoming searchable) as a first-class metric and alarm when it exceeds your re-index interval, because a silently-growing queue is invisible until a deleted secret resurfaces. This is the read-side mirror of Ch.07's write path and Ch.08's durable-execution problem: the write isn't *done* when the row commits, it's done when every derived view agrees with it.
+
+### A migration or re-embed silently halves recall quality
+
+*The symptom in one line: nothing errored, but answers got vaguer the week you changed the embedder.*
+
+The chapter's embedding-migration section tells you to stamp the model version and dual-write — this is the failure that happens when a team skips it. Someone bumps the embedding model, swaps a chunker, or changes the text template that gets embedded (adding a title prefix, normalizing case), and now half the index lives in one vector space and half in another. Cross-space similarity scores are *numerically valid and semantically meaningless* — nothing throws, RRF still fuses, the reranker still sorts, and recall quality quietly drops by a third with no error to page on. It surfaces weeks later as "the agent got worse" with no obvious cause.
+
+The fix is **eval-gated migration with a held-out query set as the gate** (Ch.16 owns the eval pipeline; Ch.17 owns eval-gated promotion). Before flipping the read path to a new embedding model or chunking strategy, run a frozen set of known-good *(query → expected result)* pairs against both the old and new index and compare recall@k and mean reciprocal rank; promote only if the new index wins or ties, and keep the old index warm for a recovery window. The mixed-space anti-pattern is the thing to make structurally impossible: refuse at the storage layer to fuse or compare results whose stamped `embedding_model` differs, so a half-migrated index fails loud instead of degrading silent. External providers handle this internally, which the chapter names as one of the better reasons to use them; if you run your own index, this gate is yours to build.
+
+### A query without a tenant scope leaks one customer's memory into another's session
+
+*The symptom in one line: a user sees a fact, preference, or document that belongs to a different customer.*
+
+The chapter is emphatic that tenant scoping is a query-time predicate and that a "default" namespace is a security hole. Here is the production shape of the failure: it is almost never a missing filter in the obvious place — it's a *new* code path. Someone adds an admin tool, a batch re-index job, a debug endpoint, or a second retriever, and that path queries the store without threading the tenant context through. The mainline filter is intact; the leak is on the road less traveled. Because it's data access, the blast radius is a cross-customer disclosure incident, not a quality bug — and it often ships green because the test suite only exercises the path that already had the filter.
+
+The fix is to **fail closed at the storage layer and run a continuous cross-tenant canary** (Ch.18 owns the full data-isolation threat model). Make the store *refuse* a query that arrives without an explicit tenant context — raise, don't default — so a new code path that forgets the scope errors loudly in development instead of leaking silently in production; an absent tenant is a thrown exception, never an empty filter that matches everything. Then run the chapter's *tenant integrity* check as a live canary, not a deploy-time test: a synthetic query in tenant A that should match an entry written only in tenant B, fired continuously against production, with a page when it ever returns that row. The mental model that closes this class: retrieval is data access first and recall second — apply the access-control discipline you'd apply to any database read, at the layer the database read happens.
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:
