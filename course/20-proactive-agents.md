@@ -247,64 +247,13 @@ A useful rule: *if the action would make a reasonable user say "wait, what?" whe
 
 ## Common failure cases
 
-The chapter above is the design. This section is what still breaks once that design is running unattended — the failures you get paged for, except half of them never page anyone, because the defining property of proactive work is that no user is watching when it goes wrong. They are ordered by how often they bite, not by how interesting they are: the first two go wrong on almost every agent that ships a proactive feature; the last three start to matter once you have real traffic, real tenants, or a watchdog left running for a year.
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
 
-### The agent trains the user to ignore it
-
-*The symptom in one line: the user has muted the agent's channel, and now even the one notification that mattered goes unseen.*
-
-This is the most common proactive failure and the most quietly fatal, because nothing errors — the agent works exactly as built, and the user simply stops looking. It usually arrives as a slow drift: a new feature ships sending one ping a day, then someone adds a second category, then a deploy-alert that fires on every deploy including the green ones, and within two weeks every message from the agent reads as noise. The cause is almost always that interrupt was treated as the default delivery mode when it should have been the rare exception, and that frequency caps were configured per *feature* instead of per *user-perceived channel* — five categories each capped at "one per hour" still lands five pings an hour in the same Slack DM.
-
-The fix is to make non-engagement a first-class signal and act on it. Cap at the *delivery surface*, not the category: budget total interrupts per user per channel per hour, and when categories compete for that budget, the lower-priority ones fall to the digest. Then instrument the thing the chapter's escalation ladder is really about — track the **engagement rate per category** (opened or acted-on ÷ delivered) and alarm when it crosses below a floor, say 10% over a rolling week. A category nobody engages with is not earning its interrupt; demote it from *interrupt* to *digest* automatically, and after a second week of silence, surface the explicit *"want to keep getting these?"* prompt the chapter describes. The anti-pattern to name and ban: *implicit consent from silence* — a week of ignored emails is not a yes, it is the user already halfway to muting you. Bias every default toward digest; you earn the right to interrupt with engagement data, never with a config flag.
-
-### The cron job stopped firing and nobody noticed for two weeks
-
-*The symptom in one line: the daily 9 a.m. brief just... isn't arriving, and the first person to find out is the user, not you.*
-
-A reactive endpoint that breaks throws errors users complain about within minutes. A cron job that breaks throws nothing — the *absence* of a run is invisible unless you specifically watch for it. The boring causes dominate: the scheduler process died on a deploy and the new one came up with cron disabled; a job's timezone was stored as a fixed UTC offset so it drifted an hour at the daylight-saving boundary and started landing at the wrong local time; the persisted job store (Hermes' `jobs.json`, Paperclip's `routines` table) was reset by a migration; or the worker pool is saturated and the run got enqueued but never picked up. Every one of these produces the same symptom — no output — and none of them trips a normal error alarm.
-
-The fix is **liveness monitoring on expected runs, not just on failures**. The chapter tells you to alarm on *consecutive failures*; that catches the job that runs and crashes, but not the job that never runs at all. Add a *heartbeat-of-expectation*: for every enabled scheduled job, record the next time it *should* fire, and alarm when that time passes by more than a grace window with no corresponding run recorded. This is dead-man's-switch monitoring — you alert on the *missing* event, the inverse of normal alerting. Two operational specifics the chapter gestures at but does not nail down: store schedules as a wall-clock time plus an IANA timezone name (`Europe/London`), never a fixed offset, so the scheduler recomputes across DST instead of silently drifting an hour twice a year; and emit a span per tick *and per skipped tick* (Ch.16) so "the scheduler is alive but decided not to fire" is distinguishable from "the scheduler is dead." A scheduler you cannot prove ticked is a scheduler you cannot trust.
-
-### The same notification fires twice (or the same job runs twice)
-
-*The symptom in one line: the user gets two identical 9 a.m. briefs, or a proactive action happens twice and one of them was a charge.*
-
-Duplicate fires are the cost of every reliability mechanism you add. A retry after a transient failure, a scheduler that scaled to two replicas without a leader election, a process that crashed *after* doing the work but *before* recording that it did — each one re-runs a job the system already ran. The chapter's run-key dedup (the `runKey(job, scheduledFor)` claim) handles the single-process case cleanly, but it breaks the moment two scheduler instances tick the same second: both compute the same key, both check "have I seen this?", both see *no*, both fire. A duplicate digest is annoying; a duplicate *act*-rung action — a second email sent, a second deploy kicked off — is an incident.
-
-The fix has two layers. First, the dedup claim must be **atomic across all schedulers**, not in-process: a single `INSERT ... ON CONFLICT DO NOTHING` (or a unique constraint, or `SELECT ... FOR UPDATE`) on the run key, in the same transaction that enqueues the run, so exactly one of the racing schedulers wins the claim and the rest no-op. This is Ch.08's atomic-claim / compare-and-swap pattern, and it is the difference between "we have a dedup table" and "dedup actually holds under concurrency." Second — and this is the layer teams skip — make the *downstream action* **idempotent** too (Ch.03's idempotency key, Ch.13's webhook dedup): pass the run key all the way through to the email send and the API call so that even if the same job somehow executes twice, the side effect commits once. Belt and suspenders, because the dedup table can fail you (a migration, a clock skew, a manual replay) and when it does, you want the side effect's own idempotency to be the thing that saves you from sending the charge twice.
-
-```ts
-// Layer 1: exactly one scheduler wins the claim, cross-process, atomically.
-// The unique constraint on run_key is what makes the race safe — losers
-// get a conflict and no-op instead of firing a duplicate.
-await ctx.db.transaction(async (tx) => {
-  const won = await tx.exec(
-    `INSERT INTO cron_dedup (run_key) VALUES ($1)
-     ON CONFLICT (run_key) DO NOTHING`, [key],   // 0 rows = someone else won
-  );
-  if (won.rowCount === 0) return;                 // not our job to fire
-  await tx.runs.enqueue({ agent: job.agent, payload: job.payload, runKey: key });
-});
-
-// Layer 2: the side effect carries the same key, so a replay is a no-op.
-await sendEmail({ to: user, body, idempotencyKey: key });   // commits once
-```
-
-### A watchdog quietly bills you for a year
-
-*The symptom in one line: a poller has been running every 30 seconds since launch, and the first sign of a problem is the invoice.*
-
-Polling and watchdog triggers are the proactive shape most prone to silent cost, because the failure mode is *steady*, not spiky — there is no crash, no error, no anomaly in the latency graph, just a constant low hum of model calls and API requests that nobody attributes to anything until finance asks what the line item is. The classic shapes: a watchdog that polls a status page every 30 seconds when the thing it watches changes twice a day; a poller left enabled after the feature it supported was deprecated; or a "back off on stable" cadence that was specified in the chapter but never actually implemented, so it polls at the baseline rate forever.
-
-The fix is to put proactive work **under the same budget gate as interactive work, and then attribute it well enough to see it**. Per-tenant budget caps (Ch.15) must apply to proactive runs identically — Paperclip's per-company gates fire regardless of trigger type, which is the right default — so a runaway poller hits a ceiling instead of running unbounded. But a budget cap only stops the catastrophe; to catch the slow bleed you need the trigger-type tag the chapter recommends (`triggered_by: cron | event | watchdog | pattern | self`) wired into the **cost ledger**, so the cost dashboard (Ch.16) can break spend down by trigger and a "watchdog spend climbing week over week with no change in detections" trend is visible *before* the invoice. The operational metric to alarm on is **cost per useful detection**: dollars spent polling ÷ number of times the watched condition actually changed. A poller burning real money to confirm "still nothing" a million times is one whose cadence is wrong, and the *back-off-on-stable* rule from the chapter is what fixes it — but only if you measure the ratio that tells you it is broken.
-
-### The agent did something unattended that a human would have stopped
-
-*The symptom in one line: a proactive run took a real-world action, and when the user saw the result their reaction was "wait, what?"*
-
-This is the rarest failure in the chapter and the most expensive when it lands, because there was no human in the loop to catch it. The setup is almost always benign: a category gets pre-approved for autonomous *act*, the action seemed bounded and reversible when it shipped, and then the world shifts under it — the data it acted on was stale, an upstream signal it trusted was wrong, or the action turned out to compose into something destructive that no single instance looked like. A reactive agent doing the same thing would have been caught at the Ch.12 approval gate; the proactive one had a category-level *yes* and ran straight through.
-
-The fix is to keep the Ch.12 gate alive *even inside pre-approved categories*, and to lower the trust ceiling for unattended work below where you would set it for interactive work. Concretely: a category-level opt-in covers the *routine* instances of that category, but destructive, irreversible, or cross-tenant actions (the chapter's *What NOT to make proactive* list) still escalate to per-instance approval — and because no user is watching, that escalation must use **async approval with a default-deny timeout** (the agent proposes, waits N hours, and on no response does *not* act and logs the timeout). The mental shift that closes this class: *the bar for autonomous action is higher than the bar for the same action with a human watching, not lower.* The chapter's "start at observe, earn the right to climb" ladder is the discipline that prevents it — a new category does not get the *act* rung on day one, it gets *observe*, then *notify*, then *ask*, and only earns *act* after you have data that the agent's proposed actions in that category would have been the right call. If the action would make a reasonable user say "wait, what?", it never should have had the rung that let it run alone.
+- **The agent trains the user to ignore it.** Proactive pings drift up in frequency until the user mutes the channel and misses the one that mattered. *Fix: cap interrupts at the delivery surface, not the category, and demote categories with low engagement to digest automatically.*
+- **The cron job stops firing and nobody notices.** A scheduled run silently stops happening, and the absence of output trips no error alarm. *Fix: dead-man's-switch liveness monitoring on expected runs — alarm on the missing event, not just on failures.*
+- **The same notification fires twice (or the same job runs twice).** Retries, replicas, or a crash-after-work re-run a job the system already ran, sometimes duplicating a real-world action. *Fix: an atomic cross-process dedup claim plus an idempotent downstream side effect (Ch.08, Ch.03).*
+- **A watchdog quietly bills you for a year.** A poller runs at baseline cadence forever, bleeding steady cost that nobody attributes until the invoice arrives. *Fix: run proactive work under the same per-tenant budget gate as interactive work (Ch.15) with trigger-type attribution in the cost ledger (Ch.16).*
+- **The agent does something unattended a human would have stopped.** A pre-approved category acts autonomously on stale data or a shifted world, with no one watching to catch it. *Fix: keep the approval gate alive inside pre-approved categories (Ch.12), escalating destructive or irreversible instances to async approval with a default-deny timeout.*
 
 ---
 

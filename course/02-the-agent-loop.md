@@ -174,54 +174,12 @@ The loop body is small. The boundary around it is where the production system ac
 
 ## Common failure cases
 
-The chapter above is the design. This section is what still breaks once that loop is running in production — the failures you actually get paged for — and the pattern that resolves each. They are ordered by how often they bite, not by how interesting they are: the first two go wrong on almost every agent that ships a loop; the last two start to matter once you run real traffic or call tools concurrently.
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
 
-### The loop only ever stops because it hit the step cap
-
-*The symptom in one line: runs finish, but they finish at the iteration ceiling, not because the model said it was done.*
-
-The agent ships, the demos look fine, and the bills are higher than they should be. You open the traces and notice that most long runs ended on the **step cap** — the hard iteration ceiling — rather than on a model-driven `end_turn`. The cap is the safety net, not the primary stop; when it becomes the primary stop, every run is paying for the maximum number of model calls instead of the number the task actually needed. The cause is usually that the softer stop conditions never fire: there is no `final_answer` tool, so the model has no clean way to declare it is done, and it keeps emitting one more "let me just double-check" tool call until the counter trips.
-
-The fix is to make the soft stops do the work and to *watch which stop fired*. Add the `final_answer` tool and make it the only legal way to submit a result, so finishing is an intentional act rather than a drift. Then make the **stop-reason a first-class metric**: emit one trace field per run — `end_turn` / `final_answer` / `step_cap` / `token_cap` / `cancelled` — and graph the distribution (Ch.16 is where this signal lives). The healthy shape is the vast majority on `end_turn` or `final_answer`; **alarm when the `step_cap` share crosses ~5–10%**, because every run in that slice is one that ran longer than it needed to. The anti-pattern that produces this failure is treating the step cap as a stop condition you *design around* instead of a fuse you *almost never blow* — if you are tuning the cap upward to "let runs finish," you are tuning the wrong knob.
-
-### A transient blip turns into a retry storm
-
-*The symptom in one line: the provider hiccups for thirty seconds, and your agent's load and bill spike far past what the hiccup should have cost.*
-
-A rate limit or a `503` is supposed to be a turn, not a crash — append the error, back off, retry. But two things go wrong under real load. First, naive retries from many concurrent runs all back off on the *same* schedule and slam the provider in synchronized waves the instant the window reopens — a *thundering herd* that turns a brief blip into a sustained outage you caused. Second, retrying an expensive deep-model call several times multiplies its cost silently; a run that should have cost one call now costs four, and nothing in the happy-path metrics shows it. The uglier variant is retrying something that was never transient — a `400` for a malformed schema will fail identically every time, so retrying it just burns the budget before surfacing the same permanent error.
-
-Three fixes the chapter gestures at but teams skip under deadline. First, **add full jitter to the backoff** — randomize each wait across the whole interval (`sleep(random(0, base * 2^attempt))`), not a fixed schedule, so concurrent runs de-synchronize instead of marching in lockstep. Second, **classify before you retry, and cap the retries**: `classify_error(err) → {retry, fallback, surface}` must route permanent errors (bad credentials, schema validation, tool-not-found) straight to *surface* with zero retries, and transient errors get a small bounded budget (3–5 attempts) before falling back to a *compatible* model — same tool format, context window, and policy parity, per this chapter's fallback rule. Third, put a **circuit breaker** in front of the provider: after N consecutive failures, stop attempting for a cooldown window and fail fast, so you stop hammering a service that is already down. Track **retries-per-successful-run** as a metric (Ch.16); a number creeping above ~0.2 means your loop is paying a retry tax it has not noticed, and a sudden spike is your early warning of an upstream degradation.
-
-```ts
-// Full jitter is the load-bearing line. A fixed schedule is what creates the herd.
-async function retryTransient(call, { maxAttempts = 5, base = 1000 }) {
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try { return await call(); }
-    catch (err) {
-      if (classify(err) !== "transient") throw err;        // permanent → surface now
-      if (attempt === maxAttempts - 1) throw err;          // budget exhausted → fall back
-      const ceiling = base * 2 ** attempt;
-      await sleep(Math.random() * ceiling);                // jitter across the WHOLE window
-    }
-  }
-}
-```
-
-### The loop is stuck, but the doom-loop filter never trips
-
-*The symptom in one line: the agent is clearly spinning, yet the byte-for-byte detector reports everything is fine.*
-
-The detector watches for the last few tool calls being *identical* — same name, same arguments. That catches the blunt case, but the expensive stuck states in production are the ones where the call shape *changes* while no real progress is made: paging through a file forever (`read(offset=0)` → `read(offset=100)` → `read(offset=200)`), re-searching with slightly reworded queries that all return nothing, or alternating between two tools that each undo the other's effect. None of those triggers byte-for-byte equality, so the loop runs until the step or cost cap finally cuts it off — which is exactly the symptom from the first failure case, now with a different root cause.
-
-The fix is to add a **no-progress heuristic** alongside the equality check. Equality is the cheap first layer; the second layer measures whether the message array is *growing without the run getting closer to done*. The concrete signal: track novel information added per step — new bytes that are not duplicates of prior tool results (the same dedupe scan Ch.05 uses for compaction surfaces this for free), or a monotonically advancing progress field that a paginating tool reports itself. **If K consecutive steps add no novel result, treat it as a doom loop**: pause and ask for permission to continue, exactly as the equality path does. The named pattern is *progress-bounded looping* — every step must either advance a measurable quantity or it does not count as progress, and a run that stops making progress is interrupted rather than left to burn the budget. Tools that page or search should report their own progress (`results_found`, `next_offset == prev_offset`) because the loop cannot always infer it from the outside; this is the same self-tracking the chapter notes for slow loops, made into a contract the tool owes the loop.
-
-### Parallel tool calls that were not actually safe to parallelize
-
-*The symptom in one line: turning on concurrent tool execution made things faster and occasionally, nondeterministically, wrong.*
-
-Running independent tool calls on a worker pool is a real latency win, and the `concurrency_safe` flag is the right gate. The failure is that the flag gets set too generously. A tool marked safe because it "only reads" actually reads *shared mutable state* that another concurrent call is writing; two calls that each look idempotent in isolation race on the same file or row and one write is lost; or the model emitted calls in a deliberate order (read-then-write, check-then-act) and the pool reordered them, so the write lands before the read it depended on. These bugs are nondeterministic by construction — they pass every test that runs the calls one at a time and only surface under the timing of real concurrent execution, which is why they are blamed on "flakiness" for weeks.
-
-The fix is a **conservative default and an explicit data-dependency check**, not a per-tool guess. Default `concurrency_safe` to **false**; a tool earns `true` only when it is genuinely read-only *and* touches no state another tool in the same turn could be mutating. Anything that writes, sends, pays, or transitions a workflow stays serialized — this is the side-effect classification Ch.03 makes part of the tool contract, and the loop is where it is enforced. When the model emits a batch, **partition it: run the safe set concurrently, run the rest in emission order**, and never let a write float ahead of a read it might depend on. The anti-pattern is treating "the model put these in one response" as proof they are independent — emission in one turn is a latency hint, not a safety guarantee. If you cannot prove two calls are independent, serialize them; the wall-clock you lose is cheaper than a lost write you cannot reproduce.
+- **Runs only ever stop at the step cap.** Long runs finish at the iteration ceiling instead of a model-driven `end_turn`, so every run pays for the maximum number of model calls. *Fix: a `final_answer` stop tool as the only legal way to finish, plus a stop-reason metric you alarm on (Ch.16).*
+- **A transient blip becomes a retry storm.** A brief provider hiccup spikes load and bill far past its cost as synchronized retries slam the provider and expensive calls re-run silently. *Fix: full-jitter backoff to de-sync the herd, classify-before-retry with a bounded budget, and a circuit breaker that fails fast.*
+- **The loop is stuck but the doom-loop filter never trips.** The agent spins making no real progress while the byte-for-byte equality detector sees changing call shapes and reports everything fine. *Fix: a no-progress heuristic alongside the equality check — progress-bounded looping where every step must advance a measurable quantity.*
+- **Parallel tool calls that were not safe to parallelize.** Concurrent execution made things faster and occasionally, nondeterministically, wrong as a too-generously-marked tool raced on shared state. *Fix: default `concurrency_safe` to false and partition each batch — run the proven-safe set concurrently, serialize the rest in emission order (Ch.03).*
 
 ---
 

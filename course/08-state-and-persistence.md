@@ -233,47 +233,13 @@ This is the system Ch.05, Ch.06, Ch.07, and Ch.08 make possible *together*. Memo
 
 ## Common failure cases
 
-The chapter above is the design. This section is what still breaks once that design meets a real deploy — the failures that page you, and the pattern that resolves each. They are ordered by how often they bite, not by how clever they are: the first two land on almost every agent the first time it restarts under load; the last three start to matter once you run across multiple processes or for long stretches.
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
 
-### A restart re-runs work that already happened
-
-*The symptom in one line: after a crash or deploy the agent re-sends an email, re-posts a PR, or re-charges a card it had already done once.*
-
-This is the headline incident of the whole chapter, and it almost always traces to one default: the harness retries any in-flight tool call on resume *unless* something told it not to. A tool started, the result never came back, the process died — and on restart the loop, having no other signal, replays it. Reads replaying is harmless. A *send* replaying is a duplicate email; a *charge* replaying is a refund ticket and an angry user. The cause is not the crash. The cause is that the harness treated "I don't know if this landed" as "safe to do again."
-
-The fix is to invert the default: an in-flight call with **no replay-safety signal fails loud and asks, never silently retries**. Make that operational with a single coverage metric — **classify-coverage**, the fraction of your side-effecting tools that carry an explicit replay verdict (`idempotent: true`, an idempotency key, or an outbox-backed intent — all from Ch.03). Alarm when coverage drops below 100% for any tool that writes, sends, or pays; an unclassified destructive tool is a duplicate waiting for the next deploy. And track the **duplicate-side-effect rate** directly: tag each external call with its step-idempotency key and count how often the same key is seen landing twice. The number should be zero. The first time it is not, you have found a tool that defaulted to retry when it should have defaulted to ask.
-
-### The checkpoint says a step finished, but the work didn't (or vice versa)
-
-*The symptom in one line: disk insists step 23 is done, yet the thing step 23 was supposed to do never happened — or happened, but disk forgot.*
-
-This is a write-ordering bug, and it is subtle precisely because nothing errors. If you mark the step complete *before* the side effect returns, a crash in the gap loses the work while the checkpoint claims success — resume skips it, and the work silently never happens. If you mark it complete *after* but the process dies between the side effect landing and the marker persisting, resume sees an unfinished step and re-runs the side effect — the duplicate from the previous case, wearing a different hat. Either ordering is wrong on its own, because a fulfillment marker only ever tells you about *your own* commit, never about whether a call that crossed the network actually arrived.
-
-The fix is the rule the whole field converges on: **write the intent down before you do the work, never after** — and when a side effect leaves your process, a local marker is not enough, you need *reconciliation* against the downstream system. The discipline is the **outbox pattern**: commit the side effect's intent (plus its idempotency key) in the *same* all-or-nothing write — a database *transaction*, where a group of writes either all commit or none do — as the step that decided it; mark it fulfilled only after delivery succeeds; on resume, replay unfulfilled intents with the same key and skip fulfilled ones. To prove the boundary holds, build the crash test into your suite: inject a process kill *between* the side effect landing and the marker persisting, and assert resume neither loses nor duplicates the work. That single test catches the case no amount of staring at the code will.
-
-### The cache is stone-cold on every deploy
-
-*The symptom in one line: the agent resumes correctly after a restart, but the first turn back costs many times what it should.*
-
-The run survives the deploy; the *prompt cache* does not. The rebuilt system prompt has to be byte-identical to what the previous process sent, or the provider re-processes the entire prefix at full price (Ch.04). The usual culprits are boring: the prompt was reassembled from parts on restart instead of round-tripped from disk, so a reordered tool registry or a normalized newline shifted a byte; or the deploy moved the run to a different model, region, or provider, and prompt caches are per-provider, per-model, often per-region — a warm cache in one region is a cold one next door. Nothing breaks. The bill just jumps, and because resume *works*, nobody looks until the cost graph does.
-
-The fix is to treat the prompt fingerprint as durable runtime state, exactly as the checkpoint already lists it: **persist the byte-identical rendered prefix and its SHA fingerprint** (Ch.04) and, on resume, rebuild from the stored bytes rather than re-assembling from parts — then assert the fingerprint matches before the first model call. Make it observable: log **cache-hit rate split by `resume` vs `steady-state`**, and alarm when the post-resume hit rate falls below your steady-state baseline. A resume-time cache-miss spike is the signature of a drifting prefix, and it is invisible to every correctness test you have because the *answer* is still right — only the cost moved. Pin model and region across a resume where you can; where a deploy forces a move, expect the cold cache and account for it rather than discovering it on the invoice.
-
-### Crashed workers leave runs stuck "running" forever — or get reaped mid-flight
-
-*The symptom in one line: a queue of runs that say "running" but no process is touching them, or a healthy long run that gets killed and restarted out from under itself.*
-
-These are the two failure modes of the same dial. Set the lease too long and a worker that died ten minutes into a job leaves the run marked `running` for six hours, blocking nothing else from picking it up — a slow leak that strands work with no error. Set the lease too short and a perfectly healthy worker doing genuinely slow work (a thirty-minute compile, a model call under load) misses one heartbeat, the reaper presumes it dead, re-queues the run, and now *two* processes are executing the same work — straight back to the duplicate-side-effect problem. The reaper is supposed to be the safety net; mis-tuned, it becomes the source of the bug it exists to prevent.
-
-The fix is to tune the **lease timeout against your real p99 step duration, not a round number** — comfortably above the slowest legitimate step, never near the median — and to make the reaper paranoid before it acts: **confirm the worker is actually dead** (verify the OS process is gone, not merely quiet) before clearing a lease, the way Paperclip's reaper checks PID liveness before reaping. Then watch two metrics from this chapter's state machine (Ch.16 owns the pipeline): the count of runs **reaped while their process was still alive** — which should be zero and tells you the lease is too aggressive — and the **age of the oldest `running` run with no recent heartbeat**, which catches the opposite leak. And give the reaper its own liveness; a reaper that has itself crashed is the most expensive silent failure here, because nothing is watching the watchman.
-
-### Resume gets slower every week and nobody changed anything
-
-*The symptom in one line: restoring a session that used to take a second now takes ten, and the checkpoint file is enormous.*
-
-The append-only audit log is supposed to grow forever (Ch.05 needs the full transcript); the per-step *snapshot* is not. When the working memory or checkpoint payload accretes — a tool result stuffed into working memory, a growing list never trimmed, the whole message array snapshotted per step instead of a range — every resume re-reads and re-deserializes a payload that gets heavier each session. There is no error and no alarm; resume just degrades along a curve, which is why it is always caught late, usually as a vague "the agent feels sluggish on restart."
-
-The fix is to **keep the per-step snapshot small and bounded, and push everything append-only into the log** where it belongs (the split this chapter already draws). Make the boundary enforceable with a budget: profile the checkpoint payload across real sessions, set a hard ceiling (a few tens of KB is plenty for working memory and counters), and **alarm when the p95 checkpoint size crosses it** rather than waiting for resume latency to complain. The anti-pattern to name and ban outright is *snapshotting the full message array into the checkpoint* — the transcript is the append-only log's job; the checkpoint stores a *range* (`messageRange`) that points into it, never a copy. A checkpoint that grows with conversation length is a checkpoint that has quietly absorbed the audit log's responsibility, and it will make every resume pay for the whole history twice.
+- **A restart re-runs work that already happened.** After a crash or deploy the agent re-sends an email, re-posts a PR, or re-charges a card. *Fix: invert the default so an in-flight call with no replay-safety signal fails loud and asks rather than silently retrying (Ch.03).*
+- **The checkpoint and the work disagree.** Disk says the step finished but the side effect never happened, or it happened but disk forgot. *Fix: the outbox pattern — write the intent before doing the work and reconcile against the downstream system on resume.*
+- **The cache is stone-cold on every deploy.** Resume is correct but the first turn back costs many times what it should. *Fix: persist the byte-identical prefix and its prompt fingerprint, rebuild from stored bytes on resume, and pin model/region where you can (Ch.04).*
+- **Crashed workers leave runs stuck, or get reaped mid-flight.** Runs marked "running" that no process touches, or a healthy long run killed out from under itself. *Fix: tune the lease against real p99 step duration and make the reaper confirm PID liveness before clearing a lease.*
+- **Resume gets slower every week.** Restoring a session that took a second now takes ten and the checkpoint file is enormous. *Fix: keep the per-step snapshot small and bounded, storing a messageRange pointer into the append-only log instead of copying the transcript.*
 
 ---
 

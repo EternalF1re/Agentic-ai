@@ -245,61 +245,13 @@ Each is a single small thing to defend against; together they are most of the pl
 
 ## Common failure cases
 
-The chapter above is the design — the four shapes and the rules for picking between them. This section is what still breaks once a planning layer is running in production, and the operational defense for each. They are ordered by how often they bite, not by how interesting they are: the first two go wrong on nearly every agent that adds a plan; the last three start to matter under scale, restarts, or genuinely uncertain tasks.
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
 
-### Every short task now pays a planning tax
-
-*The symptom in one line: a question that used to answer in one tool call now spends two model calls writing a plan first.*
-
-Someone added *"start by writing your plan"* to the system prompt — or registered a `todo_write` tool with an eager description — and the model took it literally for everything. Now *"what version of node is installed?"* gets a three-step checklist before the first real action. Nothing errors; the agent is just slower and more expensive on the high-volume short tasks that dominate most traffic, and the regression is invisible until someone looks at latency percentiles. This is the under-planning failure's mirror image, and it is more common, because "always plan" feels safe.
-
-The fix is to **gate planning on a task signal, not apply it globally**, and to measure the tax. The chapter's own rule — *require an explicit plan only when the task names two or more deliverables* — is the gate; wire it as a cheap classifier or a heuristic on the user message, not as an unconditional prompt line. Then watch **time-to-first-action**: the wall-clock gap between the user message and the first tool call. Alarm when its median creeps up while task complexity hasn't, and bucket it by task type — if the "no plan" bucket is spending model calls before acting, your gate is leaking. The cheapest planning win is often *deleting* a plan, not adding one.
-
-### The agent works off a plan that's no longer true
-
-*The symptom in one line: the plan still says "edit the file at path A," the file moved to path B three steps ago, and the agent keeps aiming at A.*
-
-The plan was written once, early, against a snapshot of the world — and then the world moved. A tool result renamed a file, a test that was failing now passes, a dependency the plan assumed was missing got installed. The plan text never changed, so the agent executes a step whose premise is already false, and the failure surfaces two or three steps later as a confusing error far from its cause. This is the **stale-assumption** trigger from this chapter's replan list, and it is the hardest of the four to catch because nothing announces it — the agent has to go *looking* for the staleness.
-
-Two defenses, layered. First, the chapter's precondition check before each step — but make it concrete: a precondition is a cheap read-only assertion (*the file exists*, *the test still fails*, *the branch is current*), not a vague *"is this still valid?"* the model answers from memory. A precondition the model evaluates by recall instead of by a tool call is no precondition at all. Second — and this is the high-leverage one — **re-read the plan from its source of truth at the top of every turn**, never from the model's recollection of it. If the plan lives in working memory (Ch.05), the prompt builder must render the *current* copy each turn; if it lives in a file, re-load the file. The anti-pattern that produces this bug is rendering the plan into the prompt *once* and trusting the model to carry it forward — which it will, faithfully, including every step that has since gone stale.
-
-### The agent rewrites the plan every step and never finishes
-
-*The symptom in one line: each turn produces a fresh plan instead of progress; the step list keeps changing but the work doesn't get done.*
-
-The replan trigger is too sensitive — any tool result that doesn't perfectly match the plan's wording counts as "new information," so the agent re-proposes the whole plan, re-pays a model call, and makes no forward progress. This is the planning-layer cousin of Ch.02's doom loop: not the same *step* repeating, but the same *plan* being rewritten in a loop, often with cosmetic differences. It's expensive (a model call per replan) and it's a top driver of runs that hit the step cap without an answer.
-
-The fix is to **make replanning a deliberate event with a budget, not a reflex**. Track the **replan rate** — the fraction of steps that triggered a replan — and treat the chapter's >30% as a hard alarm, not a vibe: above it, the plan abstraction is too fine (each step is so specific that any result "contradicts" it, so coarsen the steps) or the replan trigger is firing on noise. Add a **consecutive-replan cap**: if the agent replans N turns in a row without executing a single step in between, force one step of execution before allowing another replan — the same "execute after N" pressure the over-planning row applies, moved to the replan loop. And distinguish *amending* the plan (mark one step done, add one step) from *regenerating* it from scratch; cheap amendments shouldn't cost a full replan, and a planner that can only regenerate will thrash.
-
-### Resume re-runs steps the agent already completed
-
-*The symptom in one line: the process restarts mid-task, and the agent cheerfully re-executes three steps it had already finished.*
-
-A long task crashes or hits a deploy at step 7. On restart the agent loads its goal, *re-proposes a plan from the goal alone*, and starts from step 1 — re-reading files it read, re-running tools it ran, and in the worst case re-doing a destructive step (re-posting a comment, re-sending a write). The plan was state, but it wasn't *durable* state: the goal survived the restart and the progress did not, so resume reconstructs a plan but loses the completed-steps list. This is the planning-layer face of Ch.08's durable-execution problem, and it's why a plan that lives only in the model's working memory is dangerous across restarts.
-
-The fix is to **check-point the plan *and* the completed-step list together at the step boundary**, and on resume load both *before* the first model call — so the model wakes up knowing it is mid-task, not starting fresh. The completed-step list is the load-bearing half; without it, even a perfectly restored plan re-executes from the top.
-
-```ts
-// Resume: restore the plan AND what's already done, before the model runs.
-// Without completedStepIds, the agent re-executes finished steps on every restart.
-const cp = await store.loadPlanningCheckpoint(runId);
-const remaining = cp.plan.steps.filter(
-  s => !cp.completedStepIds.includes(s.id)   // skip what already committed
-);
-// Hand the model the remaining steps as in-progress context — not the raw goal,
-// which would tempt it to plan from scratch and redo completed work.
-await runFrom(remaining, { reason: cp.lastReplanReason });
-```
-
-The discipline that makes this safe lives in Ch.08: the step-boundary commit must persist a step's completion *before* the loop yields, so a crash can never lose a step that already ran. And a step that does destructive work must be idempotent — safe to replay with no extra effect (Ch.03) — because no checkpoint can promise a crash never lands between "the side effect happened" and "we recorded that it happened."
-
-### A 40-step plan collapses on step one
-
-*The symptom in one line: the agent writes a beautiful, detailed blueprint; the first step fails on a wrong assumption and the entire plan is now invalid.*
-
-The model was prompted to plan thoroughly and produced a forty-step specification with every tool call spelled out — *"call `read_file` on this exact path, then `write_file` changing line 42."* It reads as competence. But it's brittle: each downstream step depends on the precise outcome of the one above, so a single early surprise — a file that isn't where the plan said, a test that passes when the plan expected failure — invalidates everything below it, and the agent either thrashes trying to follow a dead plan or throws it all away and starts over. The plan was an over-specification, not a plan.
-
-The fix is to **enforce the abstraction level at plan-acceptance time**, not just hope for it. The chapter's rule — *each step maps to one or two tool calls, name an outcome and a resource, not a tool invocation* — becomes a validation gate: reject a proposed plan whose steps embed literal tool calls or named arguments, and reject one that exceeds a step ceiling (most moderately complex tasks land at 5–12 steps). This is exactly why production systems separate the **plan-only agent from the build agent** — OpenCode's distinct `plan` and `build` profiles, Paperclip's `planning_mode_directive` — so the planner produces *inspectable milestones* a human or policy can approve, and the build agent derives the concrete tool calls at runtime, where it can adapt to what it actually finds. A planner that emits implementation has skipped the abstraction the build agent exists to fill in. Track **plan-vs-execution divergence** at session end: a forty-step plan the executor abandons after step three is the metric screaming that the planner is producing low-value detail.
+- **Every short task pays a planning tax.** A question that used to answer in one tool call now spends a model call writing a plan first. *Fix: gate planning on a task signal, not globally, and watch time-to-first-action.*
+- **The agent works off a plan that's no longer true.** The world moved — a file was renamed, a test now passes — but the plan text never changed, so it executes a step whose premise is already false. *Fix: re-read the plan from its source of truth at the top of every turn, backed by cheap read-only precondition checks before each step.*
+- **The agent rewrites the plan every step and never finishes.** The replan trigger is too sensitive, so each turn regenerates the plan instead of making progress. *Fix: budgeted replanning with a consecutive-replan cap, and amend the plan instead of regenerating it.*
+- **Resume re-runs steps already completed.** A restart reconstructs the plan from the goal alone and starts from step 1, re-doing finished (sometimes destructive) work. *Fix: checkpoint the plan and the completed-step list together at the step boundary and load both before the first model call (Ch.08); destructive steps must be idempotent (Ch.03).*
+- **A 40-step plan collapses on step one.** An over-specified blueprint spells out every tool call, so one early surprise invalidates everything below it. *Fix: enforce the abstraction level at plan-acceptance time, and separate the plan-only agent from the build agent.*
 
 ---
 
