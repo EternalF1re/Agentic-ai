@@ -299,6 +299,18 @@ What the agent should *not* do: silently abandon the user's goal. A denied step 
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **The human just clicks yes.** Too many tools marked `ask`, so approvals get rubber-stamped and the one that mattered slips through with the rest. *Fix: budget asks like alerts and watch the approval funnel — move tools the human never refuses from `ask` to `allow` (Ch.16).*
+- **The loop blocks forever on an absent human.** A run sits in `WaitingApproval` for hours, pinning resources, when no human is watching the surface. *Fix: time-bound every suspended approval with auto-deny as default and alarm on pending-approval queue depth (Ch.08).*
+- **Approve-once becomes approve-everything.** A scope granted for one action is keyed on bare tool name, so the agent takes broader calls under the same yes. *Fix: bind every scope to `(tool, argument-class, fingerprint)` and treat argument drift as a fresh ask (Ch.13).*
+- **A stale approval fires twice or against a moved-on world.** A crash re-executes an already-approved action, or a hours-old approval acts on context that has since changed. *Fix: idempotent replay on the approved step plus re-validate the payload against current state at dispatch time (Ch.08).*
+- **The human approves what they can't see.** A thin or injection-poisoned payload launders a bad action through human judgment. *Fix: require a dry-run preview, render arguments as inspectable data, and source the rationale from a trusted human-facing field (Ch.03, Ch.18).*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

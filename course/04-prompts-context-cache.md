@@ -251,6 +251,17 @@ Hermes Agent goes one step further and persists the rendered prefix to its Sessi
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **A live value sneaks into the prefix.** A timestamp, session greeting, or per-turn counter mutates the stable prefix, so the cache never fires and the bill silently multiplies. *Fix: turn the prefix fingerprint into an alarm and treat anything dynamic as guilty until proven static, belonging in the volatile tail.*
+- **A deploy quietly invalidates every warm cache.** A formatter, dependency bump, or one edited tool description shifts the prefix bytes and all sessions re-warm at once. *Fix: treat the rendered prefix as a build artifact with per-layer fingerprints under change control, and roll intentional changes out at session boundaries.*
+- **Cache discipline collapses with more than one tenant.** A user-agnostic prefix leaks across tenants, or folding per-user data in shatters the shared cache into single-use entries. *Fix: make the shared/per-tenant boundary explicit in the builder and the cache key — shared block cached once, scoped tail keyed by tenant (Ch.15).*
+- **Compaction fires too eagerly and keeps the cache cold.** A fixed-cadence trigger rewrites the message array before context pressure forces it, throwing away cache the conversation was about to reuse. *Fix: compact reactively not on a cadence, and compact at the back never the middle (Ch.05).*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

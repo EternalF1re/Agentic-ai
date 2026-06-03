@@ -288,6 +288,18 @@ Ch.19 will cover the operational side of running these motions — runbooks, on-
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **A new tool ships without a trust label or a gate.** Someone wires up a fetcher or MCP server and its output reaches the model as trusted, routing around the whole pipeline. *Fix: unlabeled-is-unbuildable — a single tool factory that refuses to mint a tool without a declared trust tier and permission rule (Ch.03).*
+- **The threat-pattern scan is treated as the security boundary.** An obfuscated injection sails past the regex and nothing deterministic stands behind it. *Fix: separate detection (the scan) from enforcement (the deterministic gate on the tool call), and never collapse them into one number.*
+- **A trajectory of innocent steps adds up to an exfiltration.** Every call passes its check, yet the run reads a secret and ships it out. *Fix: per-call enforcement carrying the user's identity (Ch.03, Ch.12) plus tail-based sampling that always keeps sensitive-read-then-egress runs (Ch.16).*
+- **Your egress allowlist isn't actually closed.** A DNS name to a private IP, a redirect, or a rendered image link reaches an internal host or the metadata endpoint. *Fix: resolve-then-check the IP, re-check after every redirect hop, and apply the same allowlist to the output renderer (Ch.03).*
+- **A cheap input runs up an expensive bill.** A tenant's cost spikes overnight while every request looks legitimate. *Fix: treat cost and concurrency as a default-deny perimeter — per-tenant rate and token-budget gates with a kill switch (Ch.15, Ch.17).*
+
+---
+
 ## Pair with your agent
 
 - *"Walk through every tool in my agent. For each, list the OWASP-LLM risk it is most exposed to and the existing chapter-N control that defends it. Flag any tool where I have no control."*

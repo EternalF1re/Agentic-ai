@@ -172,6 +172,17 @@ The loop body is small. The boundary around it is where the production system ac
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Runs only ever stop at the step cap.** Long runs finish at the iteration ceiling instead of a model-driven `end_turn`, so every run pays for the maximum number of model calls. *Fix: a `final_answer` stop tool as the only legal way to finish, plus a stop-reason metric you alarm on (Ch.16).*
+- **A transient blip becomes a retry storm.** A brief provider hiccup spikes load and bill far past its cost as synchronized retries slam the provider and expensive calls re-run silently. *Fix: full-jitter backoff to de-sync the herd, classify-before-retry with a bounded budget, and a circuit breaker that fails fast.*
+- **The loop is stuck but the doom-loop filter never trips.** The agent spins making no real progress while the byte-for-byte equality detector sees changing call shapes and reports everything fine. *Fix: a no-progress heuristic alongside the equality check — progress-bounded looping where every step must advance a measurable quantity.*
+- **Parallel tool calls that were not safe to parallelize.** Concurrent execution made things faster and occasionally, nondeterministically, wrong as a too-generously-marked tool raced on shared state. *Fix: default `concurrency_safe` to false and partition each batch — run the proven-safe set concurrently, serialize the rest in emission order (Ch.03).*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

@@ -257,6 +257,17 @@ A second-order benefit: when your tools are reduced per agent, your validation s
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Valid arguments, wrong call.** The schema validator says yes and the tool does the wrong thing anyway — a well-formed `limit` that blows the context, an invented id, a path that escapes the workspace. *Fix: run a semantic check next to the schema check and before the handler, and never silently coerce a bad value into a plausible one.*
+- **The tool returns "ok" and nothing happened.** The model reports success, the loop moves on, and the side effect never landed. *Fix: verify-by-read-back inside the tool and put the proof in the metadata; return a pending handle when read-back is impossible.*
+- **A retry sends it twice — or refuses to resend on purpose.** An idempotency key scoped at the wrong grain causes a double-send, or silently swallows a deliberate repeat. *Fix: scope the key by the unit of work the user thinks they are doing, and let the downstream own dedup whenever it can (Ch.02).*
+- **Clipping blinds the model — or the full result blows the budget.** The model reasons from output it only half-received, or one giant result torches the context for the rest of the session. *Fix: clip-for-the-model, persist-in-full — make truncation loud, give the pointer a followable retrieval path, and budget result bytes at the dispatch boundary.*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

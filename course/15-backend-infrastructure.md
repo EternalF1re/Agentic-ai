@@ -359,6 +359,17 @@ Paperclip ships all five in its web UI. The pattern: operator views are read-onl
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **The queue backs up silently.** Runs sit "queued" for minutes while nothing errors, because work arrives faster than the pool drains and the durable queue absorbs it. *Fix: treat queue depth and oldest-message age as first-class SLOs, then shed load with backpressure (fast 429s) while autoscaling catches up.*
+- **A missing WHERE clause leaks one tenant into another.** One unscoped query forgets `tenant_id` and a user sees another customer's data. *Fix: make scoping impossible to forget — default-deny data-access layer plus row-level security, proven continuously by a synthetic cross-tenant canary (Ch.18).*
+- **A reconnecting client gets a hole in its stream.** A dropped connection mid-run means events fired in the gap never reach that client. *Fix: a resumable event stream backed by a per-run event log with monotonic sequence numbers, replayed from a client cursor — never the live bus as source of truth.*
+- **Two schedulers fire the same cron job twice.** A botched leader election double-dispatches due work, sending duplicate messages or charges. *Fix: a leader lock with a TTL longer than a tick plus periodic refresh (Ch.08), backed by idempotent enqueue on a per-tick dedupe key.*
+
+---
+
 ## Pair with your agent
 
 - *"Draw the layer diagram for my current backend. Identify which Ch.01–14 chapter each layer maps to, and flag anything that's missing or doubled-up (e.g., a queue that's also the state store, a worker that's also the scheduler)."*

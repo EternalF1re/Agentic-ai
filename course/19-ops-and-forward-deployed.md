@@ -280,6 +280,18 @@ The seven fields are what every runbook should answer; the template is short eno
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **A prompt fix needs a full code deploy.** You know the one sentence to change but it rides the same pipeline as code, so a fifteen-character fix waits the same forty-five minutes. *Fix: a separate, fast behavior-release lane (prompts, skills, configs in a versioned store) with the same provenance as code and a one-command revert — never a hand-edit on the box.*
+- **The model alias silently routes to a new snapshot.** Nobody deployed, but behavior shifts and success drops because config points at an unpinned alias the vendor re-pointed. *Fix: pin the dated snapshot ID plus a weekly drift check that asserts every alias still resolves where you expect and warns on approaching deprecations.*
+- **The runbook is stale the moment you need it.** You paste its command mid-incident and it errors — the flag changed, the dashboard moved, the script was deleted. *Fix: treat runbooks as testable artifacts — automated link-and-command checks, recurring game days, and a last-verified stamp.*
+- **Cost quietly doubles and you learn it from the invoice.** Spend ramps for weeks with no single alarming day. *Fix: alarm on rate-of-change and per-tenant share, not just the absolute total, with the budget as a hard gate (Ch.17).*
+- **A deploy kills work in flight.** A routine release hard-kills long-running tasks that vanish, restart from zero, or fire a side effect twice. *Fix: size the drain deadline to p99 task duration and enforce idempotency at the step boundary so resume replays a no-op (Ch.08).*
+
+---
+
 ## Pair with your agent
 
 - *"Inventory every operational surface my agent has: packaging, config, secrets, deploy, migration, shutdown, runbook, SLOs, feedback loops. For each, mark which ones I have, which I am missing, and propose the smallest first step for each gap."*

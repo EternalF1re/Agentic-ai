@@ -394,6 +394,18 @@ OpenTelemetry GenAI conventions themselves evolve. Treat them as the canonical n
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Cardinality explosion.** A per-run ID lands on a metric label, the series count blows up, and the metrics backend slows and bills by active series. *Fix: the bounded-label rule — labels carry only small closed sets, unbounded IDs go on traces and logs, and exemplars bridge a metric back to a representative trace.*
+- **Flat pile of disconnected spans.** Trace context doesn't cross an async or process boundary, so child spans start new roots and the tree fragments into orphans. *Fix: propagate trace context explicitly across every boundary, and alarm on tree shape (orphan-span rate, one root per run) rather than span volume.*
+- **Eval gate that never blocks.** A green "evals passed" check goes flaky, slow, or stale, so regressions ship past a gate that hasn't stopped anything in months. *Fix: track the gate's own block rate and judge stability, keep the blocking suite small and fast, and refresh the corpus on a schedule.*
+- **Secret leaks into traces.** A credential reaches the trace sink through a path the redactor never walked — a nested tool payload, a recorded exception, an echoed model output. *Fix: defense in depth at the trace boundary — allowlist span attributes, scrub exceptions, and prove it with a continuously-run canary secret (Ch.18).*
+- **Dashboard nobody trusts.** Every metric gets a threshold alarm, normal variance fires them constantly, and on-call learns to ignore the channel where the real alarm will appear. *Fix: alarm only on user-felt symptoms with page/ticket/dashboard-only tiering, and prune any alarm whose firings rarely lead to action.*
+
+---
+
 ## Pair with your agent
 
 - *"Wire OpenTelemetry into my harness with the `gen_ai.*` attribute conventions. Verify every model call, tool call, and approval emits a span. Open one run in my OTLP backend and confirm the trace tree matches what actually happened."*

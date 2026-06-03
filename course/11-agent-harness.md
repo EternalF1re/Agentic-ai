@@ -301,6 +301,18 @@ A pointer outside the open-source repos: Anthropic's *"Harness design for long-r
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Used before its dependency is ready.** The first request after a fresh boot fails, the second works, and you can never reproduce it locally. *Fix: an enforced readiness gate that refuses to flip until every declared dependency reports healthy — with the two-pass plugin shape, discover before you build registries, activate hooks after.*
+- **Liveness and readiness are the same probe.** A slow dependency makes a healthy process look crashed, and the supervisor restart-loops the whole fleet. *Fix: liveness-depends-on-nothing, readiness-depends-on-everything, wired to different consumers.*
+- **A gating hook fails open.** A blocked action goes through, with only a logged hook error nobody alarmed on. *Fix: fail-closed by required, explicit tag at registration — gating hooks must declare it, observational hooks opt into fail-open (Ch.12).*
+- **One tenant sees another's session.** A global singleton slips into the request path and leaks state across tenants under load. *Fix: per-tenant instance resolution at every operation boundary with no global escape hatch (Ch.15).*
+- **The harness keeps scaffolding the model outgrew.** A component still costs latency and tokens but no longer protects against anything. *Fix: a scheduled harness audit with evidence — tag each component with the measured failure it solves and A/B its removal against the eval suite (Ch.16).*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

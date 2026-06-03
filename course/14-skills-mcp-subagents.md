@@ -285,6 +285,18 @@ OpenClaw and Hermes Agent both have all three; OpenCode plugins extend skills an
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Every capability becomes a subagent.** The token bill climbs faster than traffic as full model loops nest inside full model loops. *Fix: hold the "skills first, subagents last" default and track a shape-mix metric, requiring a concrete reason to justify each rung above a skill (Ch.10).*
+- **Skills pile up in the index and the model stops following them.** Hundreds of entries tax every prompt while the model reinvents procedures inline. *Fix: prune the index on a byte budget — instrument per-skill load rate and archive dead weight through the curator (Ch.07).*
+- **One sick MCP server drags down unrelated capabilities.** A flaky kitchen-sink server fails and takes its bystanders with it. *Fix: shape servers single-purpose and give load-bearing capabilities a fallback shape, re-listing tools on reconnect (Ch.13).*
+- **A skill changes under you and quietly steers the model.** A once-trusted body is rewritten upstream and rides the prompt with its original blessing. *Fix: bind trust to a fingerprint of the body, not the source name, re-scanning on every change (Ch.12, Ch.18).*
+- **The shape that fit at week one is wrong at month six.** A skill bloats into a monster or an MCP tool gets called every turn, and nobody re-shapes it. *Fix: make migration triggers measurable and run a scheduled shape-migration audit.*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

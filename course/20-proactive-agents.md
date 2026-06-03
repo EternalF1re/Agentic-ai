@@ -245,6 +245,18 @@ A useful rule: *if the action would make a reasonable user say "wait, what?" whe
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **The agent trains the user to ignore it.** Proactive pings drift up in frequency until the user mutes the channel and misses the one that mattered. *Fix: cap interrupts at the delivery surface, not the category, and demote categories with low engagement to digest automatically.*
+- **The cron job stops firing and nobody notices.** A scheduled run silently stops happening, and the absence of output trips no error alarm. *Fix: dead-man's-switch liveness monitoring on expected runs — alarm on the missing event, not just on failures.*
+- **The same notification fires twice (or the same job runs twice).** Retries, replicas, or a crash-after-work re-run a job the system already ran, sometimes duplicating a real-world action. *Fix: an atomic cross-process dedup claim plus an idempotent downstream side effect (Ch.08, Ch.03).*
+- **A watchdog quietly bills you for a year.** A poller runs at baseline cadence forever, bleeding steady cost that nobody attributes until the invoice arrives. *Fix: run proactive work under the same per-tenant budget gate as interactive work (Ch.15) with trigger-type attribution in the cost ledger (Ch.16).*
+- **The agent does something unattended a human would have stopped.** A pre-approved category acts autonomously on stale data or a shifted world, with no one watching to catch it. *Fix: keep the approval gate alive inside pre-approved categories (Ch.12), escalating destructive or irreversible instances to async approval with a default-deny timeout.*
+
+---
+
 ## What's next
 
 You now have a frame for proactive design — the trigger taxonomy, the opt-in discipline, the escalation ladder, the timing modes, and the failure modes specific to work done while no user is watching. Ch.21 picks up from a related angle: instead of *the agent acting on its own*, what if *the agent improves itself on its own?* Self-evolving agents — memory consolidation, skill learning, prompt refinement, LoRA personalization — are the natural complement to proactive scheduling, with the same gating discipline and the same need for the rollback paths from Ch.07.

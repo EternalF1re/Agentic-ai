@@ -255,6 +255,18 @@ Two practical notes: keep the reviewer's tool set tighter than the worker's (usu
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Fan-out triples the token bill.** One task split into a fan of subagents costs many loops plus synthesis, and no single trace looks alarming. *Fix: a fan budget rolled up to the parent run, with a cost-based cap on the whole tree rather than per-leaf counts.*
+- **The subagent returns a wall of text.** Good work wrapped in prose the parent has to spend another model call to interpret, eating cache and context. *Fix: terseness as a validated constraint — a bounded result schema and a hard output cap, reject-and-retry on overrun.*
+- **Parallel subagents corrupt a shared artifact.** Siblings edit the same state at once and the merge breaks in ways no single output explains. *Fix: partition the work so siblings can't collide, falling back to real concurrency control (Ch.08) only where overlap is unavoidable.*
+- **A subagent returns a confident wrong answer.** The result has the right shape but false content, and schema validation can't catch it. *Fix: adversarial cross-check with independent access to the evidence and checkable citations, not a self-graded confidence field.*
+- **A background subagent dies and the parent waits forever.** An async worker crashes and the result never lands; the failure is an absence with no exception to catch. *Fix: treat async delegation as a leased run with a deadline and a fan-in policy for partial returns (Ch.08).*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

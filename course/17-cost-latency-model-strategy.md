@@ -313,6 +313,18 @@ Surface all of these as policy knobs on the routing layer, not as hardcoded cons
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Everything runs on the expensive model.** Compaction, classification, and title generation all go through the deep model, and the bill is several times your estimate. *Fix: make the auxiliary tier a hard architectural boundary and instrument cost-by-call-purpose.*
+- **The prompt cache silently stops hitting.** Cost per turn creeps up with no feature change as the cache-read share falls toward zero. *Fix: watch cache-read share as a metric and forbid the mid-session model swap — pick the main model at session start and keep it fixed (Ch.04).*
+- **Your token estimate disagrees with the provider's bill.** Pre-call budgets pass but tenants overrun, or you reject requests that would have fit. *Fix: normalize usage at the adapter boundary so the cost formula never touches a raw provider response (Ch.11).*
+- **Quality escalation re-runs the same wrong answer.** A failed-check step retries the same model with the same prompt, paying N times for one bad result. *Fix: separate transient retry from quality escalation and cap escalation at a single hop (Ch.15).*
+- **Downgrading to save money wrecks quality.** A budget overrun quietly routes a tenant to a cheaper profile and quality regresses with no alarm. *Fix: make downgrade a per-tenant budget policy and gate every permanent profile change behind eval-gated promotion (Ch.16).*
+
+---
+
 ## Pair with your agent
 
 - *"Inventory every model call in my agent. For each, tell me which profile it should use (`fast`, `balanced`, `deep`, `embedding`, `local-private`) and why. Flag any call that is currently using the wrong profile."*

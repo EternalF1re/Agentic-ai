@@ -236,6 +236,18 @@ If you want a piece of memory to be live, put it in the tail (tool results, work
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Compaction torches the cache.** The loop keeps working, but cost-per-turn jumps the moment compaction fires and never recovers. *Fix: treat compaction as a deliberate cache reset and pin the post-compaction prefix byte-stable until the next pass (Ch.04).*
+- **The summary drops the load-bearing fact.** Right after compaction the agent re-reads, re-asks, or forgets the original task — reasoning confidently from a summary that is almost right. *Fix: protect both ends and emit a structured facts / decisions / open-questions summary so specifics survive.*
+- **Compaction thrashes.** Once the session is big, nearly every turn triggers a pass and the summarizer call becomes per-turn latency. *Fix: hysteresis water-marks — a high mark to start, a lower mark to compact down to, so each pass buys many turns.*
+- **The summary of the summary loses the thread.** After several passes the agent drifts further from the real goal each time, like re-saving a JPEG. *Fix: always re-summarize from the audit log, never from a prior summary, and rotate the session when passes cap out (Ch.08).*
+- **Dedupe deletes a snapshot that still mattered.** The agent acts as if a value never changed because only its latest read survived. *Fix: default-unsafe dedupe — anything that can differ across identical calls is `open_world` and exempt (Ch.03).*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

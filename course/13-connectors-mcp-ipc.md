@@ -395,6 +395,18 @@ The failure modes specific to the connector layer, distinct from the rest of the
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Duplicate replies.** A retried webhook or re-delivered queue message runs the loop twice, so the user gets the same answer (or the same expensive action) more than once. *Fix: dedup-before-enqueue with a seen-store keyed on the platform's event ID, plus an idempotency key (Ch.03) on the outbound.*
+- **Silence under load, or channel flooding.** A burst trips the platform's rate limit and the agent gets throttled into silence, or it loops and floods until the bot is banned. *Fix: a rate-limited, backpressured outbound queue with per-tenant/per-channel state and a volume circuit breaker.*
+- **An MCP server hangs and freezes the turn.** A tool call never returns — a deadlock, half-open socket, or slow leak — and the loop blocks forever instead of degrading. *Fix: a per-call timeout that yields a recoverable error envelope (Ch.02), plus a per-server circuit breaker and liveness check.*
+- **Replies land in the wrong place, or leak across conversations.** A collapsed session key sends a private answer to a public channel or bleeds one user's context into another's. *Fix: keep the full session key load-bearing both directions and treat visibility as an explicit hard gate, defaulting to the narrowest scope.*
+- **A trusted connector does something you never authorized.** A server claiming read-only quietly writes or exfiltrates, or a bot token lands in a forwarded log. *Fix: a first-time-trust gate (Ch.12) plus treating connectors as untrusted input and code — conservative defaults on `*Hint`, boundary redaction (Ch.07), and a canary credential.*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

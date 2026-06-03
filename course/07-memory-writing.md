@@ -243,6 +243,18 @@ These metrics belong in Ch.16's trace pipeline next to the retrieval signals fro
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Memory fills with junk.** An over-eager `write_memory` stores transient output until retrieval drowns in noise. *Fix: make the tool's "never write" list ruthless.*
+- **A stored fact goes stale or self-contradicts.** An old value is still asserted as true, or two entries disagree. *Fix: stamp every write with confidence + timestamp and resolve conflicts at write time.*
+- **A write is lost or torn by a crash.** The note saved but its index/event didn't — or it never reached disk. *Fix: the outbox pattern — commit the intent before doing the work (Ch.08).*
+- **The curator never runs.** Idle-time curation never fires on a busy agent, so memory grows unbounded. *Fix: trigger on idle, a size/age threshold, or a max-interval floor — whichever fires first.*
+- **An injection gets written to memory.** A hostile instruction slips the filter and rides in the prompt every future session. *Fix: defend on the read side too — quarantine new memory, render it as data not instructions (Ch.18).*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

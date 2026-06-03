@@ -244,6 +244,18 @@ The recall layer and the prompt-builder layer are not separate concerns — they
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Vector search always returns something.** k-NN can't return nothing, so the agent confidently cites the least-irrelevant noise when nothing actually matches. *Fix: a score floor plus a query-type router that sends identifiers to full-text search first.*
+- **Bad chunking caps your recall ceiling.** The right document is in the store but the agent retrieves the wrong piece of it, or half of it. *Fix: semantic-boundary chunking with overlap, measured against a recall@k gold set rather than similarity scores.*
+- **The index falls behind the source of truth.** Retrieval serves an entry that was edited or deleted minutes ago, or misses one just written. *Fix: treat the index as a fail-safe derived view re-validated against the canonical row, and alarm on its lag (Ch.08).*
+- **A migration silently halves recall quality.** Nothing errors, but mixing two vector spaces makes answers vaguer the week you change the embedder. *Fix: eval-gated migration with a held-out query set as the gate, and refuse to compare results across embedding versions (Ch.16, Ch.17).*
+- **A query without tenant scope leaks across customers.** A new code path queries the store without threading tenant context, disclosing one customer's memory in another's session. *Fix: fail-closed tenant scoping at the storage layer plus a continuous cross-tenant canary (Ch.18).*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

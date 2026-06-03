@@ -134,6 +134,18 @@ If you are building seriously, hide the wire format behind a small adapter so yo
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **An unanswered tool request.** The conversation stops and the next call is rejected for a dangling `tool_use` — a swallowed exception, a half-answered parallel batch, or reordered messages. *Fix: the answer-every-tool_use invariant — reconcile the requested id set against the returned `tool_result` set before every model call.*
+- **Well-formed but made-up arguments.** The JSON passes the schema, the tool runs against a hallucinated id or value, and the result is confidently wrong. *Fix: semantic validation past the schema — when a value parses but doesn't resolve, return a `tool_result` that names what was wrong and where to get a valid value (Ch.03).*
+- **The model under- or over-calls the tool.** It fabricates an answer it had a tool for, or fires a tool on turns that needed none. *Fix: treat tool selection as a measured behavior driven by the tool description, and take the choice with `tool_choice` when it isn't the model's to make.*
+- **A single tool call hangs the whole turn.** One slow dependency with no deadline freezes the turn with no error and no result. *Fix: a per-tool timeout that converts a hang into a readable `tool_result`, set below the turn budget (Ch.02).*
+- **A large result wrecks every later turn.** A big result lands in the message array, re-sends each turn, and quietly raises cost, latency, and cache misses. *Fix: clip-and-persist at the tool boundary — a byte budget on the tool definition that returns a snippet plus a handle for the full thing.*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

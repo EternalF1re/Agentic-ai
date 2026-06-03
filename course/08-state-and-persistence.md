@@ -231,6 +231,18 @@ This is the system Ch.05, Ch.06, Ch.07, and Ch.08 make possible *together*. Memo
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **A restart re-runs work that already happened.** After a crash or deploy the agent re-sends an email, re-posts a PR, or re-charges a card. *Fix: invert the default so an in-flight call with no replay-safety signal fails loud and asks rather than silently retrying (Ch.03).*
+- **The checkpoint and the work disagree.** Disk says the step finished but the side effect never happened, or it happened but disk forgot. *Fix: the outbox pattern — write the intent before doing the work and reconcile against the downstream system on resume.*
+- **The cache is stone-cold on every deploy.** Resume is correct but the first turn back costs many times what it should. *Fix: persist the byte-identical prefix and its prompt fingerprint, rebuild from stored bytes on resume, and pin model/region where you can (Ch.04).*
+- **Crashed workers leave runs stuck, or get reaped mid-flight.** Runs marked "running" that no process touches, or a healthy long run killed out from under itself. *Fix: tune the lease against real p99 step duration and make the reaper confirm PID liveness before clearing a lease.*
+- **Resume gets slower every week.** Restoring a session that took a second now takes ten and the checkpoint file is enormous. *Fix: keep the per-step snapshot small and bounded, storing a messageRange pointer into the append-only log instead of copying the transcript.*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

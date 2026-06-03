@@ -243,6 +243,18 @@ Each is a single small thing to defend against; together they are most of the pl
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **Every short task pays a planning tax.** A question that used to answer in one tool call now spends a model call writing a plan first. *Fix: gate planning on a task signal, not globally, and watch time-to-first-action.*
+- **The agent works off a plan that's no longer true.** The world moved — a file was renamed, a test now passes — but the plan text never changed, so it executes a step whose premise is already false. *Fix: re-read the plan from its source of truth at the top of every turn, backed by cheap read-only precondition checks before each step.*
+- **The agent rewrites the plan every step and never finishes.** The replan trigger is too sensitive, so each turn regenerates the plan instead of making progress. *Fix: budgeted replanning with a consecutive-replan cap, and amend the plan instead of regenerating it.*
+- **Resume re-runs steps already completed.** A restart reconstructs the plan from the goal alone and starts from step 1, re-doing finished (sometimes destructive) work. *Fix: checkpoint the plan and the completed-step list together at the step boundary and load both before the first model call (Ch.08); destructive steps must be idempotent (Ch.03).*
+- **A 40-step plan collapses on step one.** An over-specified blueprint spells out every tool call, so one early surprise invalidates everything below it. *Fix: enforce the abstraction level at plan-acceptance time, and separate the plan-only agent from the build agent.*
+
+---
+
 ## Pair with your agent
 
 A few prompts that work well on this chapter:

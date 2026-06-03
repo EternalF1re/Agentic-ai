@@ -285,6 +285,18 @@ A pointer outside the open-source repos: Anthropic's writing on *post-training* 
 
 ---
 
+## Common failure cases
+
+*These failures are durable; their fixes evolve fastest — each names the pattern and leaves current specifics to you and your AI partner.*
+
+- **The eval gate never rejects anything.** Every proposal sails through, the agent keeps changing, and the gate is graded on its own homework against a drifting baseline. *Fix: replay a held-out corpus the proposer never sees, freeze a golden baseline at init, and track the proposal rejection rate to confirm the gate still bites (Ch.16).*
+- **The agent learns the wrong lesson from one bad turn.** A fluke, an outage, or a terse user becomes a permanent fact or skill from a sample of one. *Fix: gate evolution on recurrence across N independent sessions, not a single occurrence, and quarantine new memory before it influences behavior (Ch.07).*
+- **Skills pile up until they fight each other.** An add-only library grows into near-duplicates, the model picks the wrong one, and the curator's idle window never comes. *Fix: a skill-count and byte cap that forces a consolidation pass to admit each new entry, on a hybrid curator trigger (idle or interval or cap breach).*
+- **The personalized adapter quietly drifts off the rails.** Opaque weights reward-hack the judge or erode against a baseline you snapshotted once and never re-ran. *Fix: re-run the frozen golden eval on every adapter swap, score on a multi-signal eval not one judge number, and keep the base-model fallback drilled (Ch.18 owns the policy side).*
+- **An auto-applied update widens what the agent may do.** Authority gets broadened sideways through a memory entry, skill body, or prompt section the gate promoted because its `kind` looked safe. *Fix: run a blast-radius classifier on the patch content and deny-by-default any proposal that touches authority regardless of layer, routing it to human change management (Ch.19).*
+
+---
+
 ## Pair with your agent
 
 - *"Inventory what currently evolves in my agent vs what is hard-coded. For each layer in the five-loop architecture (memory, skills, prompt sections, tool descriptions, model weights), tell me which ones I have, which I am missing, and which I should explicitly *not* automate."*
