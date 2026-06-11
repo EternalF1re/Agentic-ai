@@ -1,0 +1,7 @@
+aiohttp>=3.9.0
+fastapi>=0.111.0
+numpy>=1.26.0
+openai>=1.40.0
+portalocker>=2.8.0
+uvicorn[standard]>=0.30.0
+websockets>=12.0

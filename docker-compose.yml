@@ -1,0 +1,31 @@
+services:
+  agent-harness:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agent-harness-demo:latest
+    container_name: agent-harness-demo
+    env_file:
+      - ${ENV_FILE:-.env}
+    ports:
+      - "${AGENT_HTTP_PORT:-8000}:8000"
+    volumes:
+      - agent_workspace_state:/app/workspace/sessions
+      - agent_tenant_memory:/app/workspace/tenants
+      - agent_traces:/app/workspace/traces
+      - agent_runtime_files:/app/workspace/runtime
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  agent_workspace_state:
+  agent_tenant_memory:
+  agent_traces:
+  agent_runtime_files:

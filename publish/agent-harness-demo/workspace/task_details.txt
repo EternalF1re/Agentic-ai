@@ -1,0 +1,11 @@
+Recent advances in large language models (LLMs) have accelerated the development of AI-driven automated program repair (APR)
+solutions. However, these solutions are typically evaluated using static benchmarks such as Defects4J and SWE-bench, which suffer
+from two key limitations: (1) the risk of data contamination, potentially inflating evaluation results due to overlap with LLM training
+data, and (2) limited ability to assess the APR capabilities in dynamic and diverse contexts. In this paper, we introduced BloomAPR, a
+novel dynamic evaluation framework grounded in Bloom’s Taxonomy. Our framework offers a structured approach to assess the
+cognitive capabilities of LLM-powered APR solutions across progressively complex reasoning levels. Using Defects4J as a case study,
+we evaluated two state-of-the-art LLM-powered APR solutions, ChatRepair and CigaR, under three different LLMs: GPT-3.5-Turbo,
+Llama-3.1, and StarCoder-2. Our findings show that while these solutions exhibit basic reasoning skills and effectively memorize
+bug-fixing patterns (fixing up to 81.57% of bugs at the Remember layer), their performance increases with synthetically generated bugs
+(up to 60.66% increase at the Understand layer). However, they perform worse on minor syntactic changes (fixing up to 43.32% at theApply layer), and they struggle to repair similar bugs when injected into real-world projects (solving only 13.46% to 41.34% bugs at theAnalyze layer). These results underscore the urgent need for evolving benchmarks and provide a foundation for more trustworthy
+evaluation of LLM-powered software engineering solutions.
